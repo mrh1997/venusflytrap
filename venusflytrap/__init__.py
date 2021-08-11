@@ -1,18 +1,7 @@
 from __future__ import annotations
 import functools
-from typing import (
-    get_origin,
-    get_args,
-    get_type_hints,
-    List,
-    Set,
-    Union,
-    Type,
-    TypeVar,
-    Tuple,
-    Iterator,
-    Dict,
-)
+from typing import get_origin, get_args, List, Set, Union
+from typing import Iterator, Dict, Optional, Type, TypeVar, Tuple
 from dataclasses import dataclass
 import z3
 
@@ -179,16 +168,25 @@ class TestOptionMeta(type, Constraint):
         yield self
 
 
+BindTypes = Union["TestOption", Set["TestOption"], Optional["TestOption"]]
+
+
 class TestOption(metaclass=TestOptionMeta):
     __z3var: z3.Bool
     __abstract = True
     constraints: List[Constraint] = []
     implementations: Set[Type[TestOption]] = set()
+    bindings: Dict[str, Type[BindTypes]] = dict()
 
     def __init_subclass__(cls, abstract=False, **kwargs):
         super().__init_subclass__(**kwargs)
         cls.implementations = set()
         cls.constraints = cls.constraints[:]  # create copy
+        cls.bindings = cls.bindings.copy()
+        for nm, val in cls.__dict__.copy().items():
+            if isinstance(val, Bind):
+                delattr(cls, nm)
+                cls.bindings[nm] = val.testoption_type
         cls.__z3var = z3.Bool(f"{cls.__name__}@{id(cls)}")
         cls.__abstract = abstract
         for attrname, depcls, count_spec in cls._direct_dependencies():
@@ -250,10 +248,7 @@ class TestOption(metaclass=TestOptionMeta):
     @functools.lru_cache()
     def _direct_dependencies(cls) -> Set[Tuple[str, Type[TestOption], str]]:
         result = set()
-        initialized_attrs = dir(cls)
-        for attrname, depcls in get_type_hints(cls).items():
-            if attrname in initialized_attrs:
-                continue
+        for attrname, depcls in cls.bindings.items():
             if get_origin(depcls) is Union and get_args(depcls)[1:2] == (type(None),):
                 depcls = get_args(depcls)[0]
                 count_spec = "ZERO_OR_ONE"
@@ -285,7 +280,7 @@ def generate_testsetup(root_testoption: Type[T], *constrs: Constraint) -> T:
         model = solver.model()
         return {to: to() for to in available_testoptions if model[to._to_z3_formula()]}
 
-    def link_instances(testoptions: Dict[Type[TestOption], TestOption]):
+    def bind_instances(testoptions: Dict[Type[TestOption], TestOption]):
         for to in testoptions.values():
             for attrname, cls, count_spec in to._direct_dependencies():
                 impls = {
@@ -300,5 +295,17 @@ def generate_testsetup(root_testoption: Type[T], *constrs: Constraint) -> T:
                     setattr(to, attrname, impl)
 
     testoptions = instanciate_matching_testoptions()
-    link_instances(testoptions)
+    bind_instances(testoptions)
     return testoptions[root_testoption]
+
+
+TB = TypeVar("TB")
+
+
+@dataclass
+class Bind:
+    testoption_type: BindTypes
+
+
+def bind(testoption_type: Type[TB]) -> TB:
+    return Bind(testoption_type)

@@ -8,8 +8,8 @@ from venusflytrap import (
     Implies,
     Type,
     requires,
+    bind,
     generate_testsetup,
-    And,
     UnsolvableError,
 )
 from typing import Optional, Set
@@ -119,9 +119,9 @@ class TestTestOption:
             pass
 
         class Impl(TestOption):
-            dep: A
-            opt_dep: Optional[B]
-            set_dep: Set[C]
+            dep = bind(A)
+            opt_dep = bind(Optional[B])
+            set_dep = bind(Set[C])
 
         assert set(Impl.constraints) == {
             Implies(Impl, ExactOne(A)),
@@ -132,7 +132,7 @@ class TestTestOption:
         with pytest.raises(TypeError) as exc:
 
             class Impl(TestOption):
-                dep: int
+                dep = bind(int)
 
         assert "Impl.dep" in str(exc)
 
@@ -174,10 +174,10 @@ class TestTestOption:
             pass
 
         class ImplB(B):
-            dep: A
+            dep = bind(A)
 
         class ImplC(TestOption):
-            dep: B
+            dep = bind(B)
 
         assert set(ImplC.iter_dependencies()) == {ImplA, ImplB, ImplC}
 
@@ -195,8 +195,8 @@ class TestTestOption:
             pass
 
         class C(TestOption):
-            opt_dep: Optional[A]
-            set_dep: Set[B]
+            opt_dep = bind(Optional[A])
+            set_dep = bind(Set[B])
 
         assert set(C.iter_dependencies()) == {C, ImplA, ImplB}
 
@@ -205,7 +205,7 @@ class TestTestOption:
             pass
 
         class Impl2(TestOption):
-            dep: Impl1
+            dep = bind(Impl1)
 
         @requires(Impl2)
         class Impl3(TestOption):
@@ -218,14 +218,14 @@ class TestTestOption:
             pass
 
         class ImplMiddle1(TestOption):
-            dep: ImplLeaf
+            dep = bind(ImplLeaf)
 
         class ImplMiddle2(TestOption):
-            dep: ImplLeaf
+            dep = bind(ImplLeaf)
 
         class ImplRoot(TestOption):
-            dep1: ImplMiddle2
-            dep2: ImplMiddle1
+            dep1 = bind(ImplMiddle2)
+            dep2 = bind(ImplMiddle1)
 
         leaf, *middle, root = list(ImplRoot.iter_dependencies())
         assert leaf == ImplLeaf
@@ -374,7 +374,7 @@ class TestGenerateTestSetup:
                 self.val = 123
 
         class Impl(TestOption):
-            dep: A
+            dep = bind(A)
 
         ts = generate_testsetup(Impl)
         assert ts.dep.val == 123
@@ -397,7 +397,7 @@ class TestGenerateTestSetup:
             pass
 
         class Impl(TestOption):
-            dep: Optional[A]
+            dep = bind(Optional[A])
 
         ts = generate_testsetup(Impl)
         assert ts.dep is None
@@ -410,7 +410,7 @@ class TestGenerateTestSetup:
         implAs = {type("ImplA", (A,), {}) for c in range(impl_count)}
 
         class Impl(TestOption):
-            dep: Set[A]
+            dep = bind(Set[A])
 
         ts = generate_testsetup(Impl, *implAs)
         assert {type(to) for to in ts.dep} == implAs
@@ -426,7 +426,7 @@ class TestGenerateTestSetup:
         implAs = [type("ImplA", (A,), {"__init__": __init__}) for c in range(10)]
 
         class Impl(TestOption):
-            dep: A
+            dep = bind(A)
 
         inst_cnt = 0
         ts = generate_testsetup(Impl)
