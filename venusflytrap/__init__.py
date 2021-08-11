@@ -1,6 +1,5 @@
-from __future__ import annotations
 import functools
-from typing import get_origin, get_args, List, Set, Union
+from typing import get_origin, get_args, List, Set, Union, Generic
 from typing import Iterator, Dict, Optional, Type, TypeVar, Tuple
 from dataclasses import dataclass
 import z3
@@ -17,13 +16,13 @@ class Constraint:
     def __iter__(self):
         raise NotImplementedError("This is an abstract base class")
 
-    def __and__(self, other: Constraint):
+    def __and__(self, other: "Constraint"):
         return And(self, other)
 
-    def __or__(self, other: Constraint):
+    def __or__(self, other: "Constraint"):
         return Or(self, other)
 
-    def __xor__(self, other: Constraint):
+    def __xor__(self, other: "Constraint"):
         return Xor(self, other)
 
     def __invert__(self):
@@ -95,7 +94,7 @@ class Implies(Constraint):
 
 @dataclass(frozen=True)
 class No(Constraint):
-    op: Type[TestOption]
+    op: Type["TestOption"]
 
     @functools.lru_cache
     def _to_z3_formula(self):
@@ -109,7 +108,7 @@ class No(Constraint):
 
 @dataclass(frozen=True)
 class Any(Constraint):
-    op: Type[TestOption]
+    op: Type["TestOption"]
 
     @functools.lru_cache
     def _to_z3_formula(self):
@@ -121,7 +120,7 @@ class Any(Constraint):
 
 @dataclass(frozen=True)
 class ExactOne(Constraint):
-    op: Type[TestOption]
+    op: Type["TestOption"]
 
     @functools.lru_cache
     def _to_z3_formula(self):
@@ -159,8 +158,6 @@ def requires(constraint: Constraint):
 
 
 class TestOptionMeta(type, Constraint):
-    pass
-
     def __repr__(self):
         return "<" + self.__name__ + ">"
 
@@ -170,12 +167,36 @@ class TestOptionMeta(type, Constraint):
 
 BindTypes = Union["TestOption", Set["TestOption"], Optional["TestOption"]]
 
+T = TypeVar("T", bound="TestOption")
+
+
+class TestSetup(Generic[T]):
+    def __init__(
+        self, root: Type[T], testoptions: Dict[Type["TestOption"], "TestOption"]
+    ):
+        self.root = root
+        self.testoptions = testoptions
+
+    @property
+    def root_inst(self) -> T:
+        return self.testoptions[self.root]
+
+    def run(self) -> T:
+        for impl in self.root.iter_dependencies():
+            if impl in self.testoptions:
+                self.testoptions[impl].setup()
+        self.root_inst.test()
+        for impl in reversed(list(self.root.iter_dependencies())):
+            if impl in self.testoptions:
+                self.testoptions[impl].teardown()
+        return self.root_inst
+
 
 class TestOption(metaclass=TestOptionMeta):
     __z3var: z3.Bool
     __abstract = True
     constraints: List[Constraint] = []
-    implementations: Set[Type[TestOption]] = set()
+    implementations: Set[Type["TestOption"]] = set()
     bindings: Dict[str, Type[BindTypes]] = dict()
 
     def __init_subclass__(cls, abstract=False, **kwargs):
@@ -219,7 +240,7 @@ class TestOption(metaclass=TestOptionMeta):
                 basecls.register_implementation(cls)
 
     @classmethod
-    def register_implementation(cls, impl_cls: Type[TestOption]):
+    def register_implementation(cls, impl_cls: Type["TestOption"]):
         cls.implementations.add(impl_cls)
 
     @classmethod
@@ -228,8 +249,8 @@ class TestOption(metaclass=TestOptionMeta):
 
     @classmethod
     def iter_dependencies(
-        cls, collected_deps: Set[Type[TestOption]] = None
-    ) -> Iterator[Type[TestOption]]:
+        cls, collected_deps: Set[Type["TestOption"]] = None
+    ) -> Iterator[Type["TestOption"]]:
         collected_deps = collected_deps if collected_deps is not None else set()
         for impl in cls.implementations:
             if impl in collected_deps:
@@ -246,7 +267,7 @@ class TestOption(metaclass=TestOptionMeta):
 
     @classmethod
     @functools.lru_cache()
-    def _direct_dependencies(cls) -> Set[Tuple[str, Type[TestOption], str]]:
+    def _direct_dependencies(cls) -> Set[Tuple[str, Type["TestOption"], str]]:
         result = set()
         for attrname, depcls in cls.bindings.items():
             if get_origin(depcls) is Union and get_args(depcls)[1:2] == (type(None),):
@@ -260,43 +281,53 @@ class TestOption(metaclass=TestOptionMeta):
             result.add((attrname, depcls, count_spec))
         return result
 
+    T = TypeVar("T")
 
-T = TypeVar("T", bound=TestOption)
-
-
-def generate_testsetup(root_testoption: Type[T], *constrs: Constraint) -> T:
-    def instanciate_matching_testoptions():
-        available_testoptions = set(root_testoption.iter_dependencies())
-        solver = z3.Solver()
-        solver.add(root_testoption._to_z3_formula())
-        for constr in constrs:
-            solver.add(constr._to_z3_formula())
-            available_testoptions |= set(constr)
-        for to in available_testoptions:
-            for constr in to.constraints:
+    @classmethod
+    def generate_testsetup(cls: Type[T], *constrs: Constraint) -> TestSetup[T]:
+        def instanciate_matching_testoptions():
+            available_testoptions = set(cls.iter_dependencies())
+            solver = z3.Solver()
+            solver.add(cls._to_z3_formula())
+            for constr in constrs:
                 solver.add(constr._to_z3_formula())
-        if solver.check() != z3.sat:
-            raise UnsolvableError("Cannot solve constraints")
-        model = solver.model()
-        return {to: to() for to in available_testoptions if model[to._to_z3_formula()]}
+                available_testoptions |= set(constr)
+            for to in available_testoptions:
+                for constr in to.constraints:
+                    solver.add(constr._to_z3_formula())
+            if solver.check() != z3.sat:
+                raise UnsolvableError("Cannot solve constraints")
+            model = solver.model()
+            return {
+                to: to() for to in available_testoptions if model[to._to_z3_formula()]
+            }
 
-    def bind_instances(testoptions: Dict[Type[TestOption], TestOption]):
-        for to in testoptions.values():
-            for attrname, cls, count_spec in to._direct_dependencies():
-                impls = {
-                    testoptions[impl]
-                    for impl in cls.implementations
-                    if impl in testoptions
-                }
-                if count_spec == "ANY":
-                    setattr(to, attrname, impls)
-                else:
-                    impl = impls.pop() if impls else None
-                    setattr(to, attrname, impl)
+        def bind_instances(testoptions: Dict[Type[TestOption], TestOption]):
+            for to in testoptions.values():
+                for attrname, depcls, count_spec in to._direct_dependencies():
+                    impls = {
+                        testoptions[impl]
+                        for impl in depcls.implementations
+                        if impl in testoptions
+                    }
+                    if count_spec == "ANY":
+                        setattr(to, attrname, impls)
+                    else:
+                        impl = impls.pop() if impls else None
+                        setattr(to, attrname, impl)
 
-    testoptions = instanciate_matching_testoptions()
-    bind_instances(testoptions)
-    return testoptions[root_testoption]
+        testoptions = instanciate_matching_testoptions()
+        bind_instances(testoptions)
+        return TestSetup(cls, testoptions)
+
+    def setup(self):
+        pass
+
+    def test(self):
+        pass
+
+    def teardown(self):
+        pass
 
 
 TB = TypeVar("TB")
