@@ -1,6 +1,7 @@
 import functools
 from typing import get_origin, get_args, List, Set, Union, Generic, FrozenSet
-from typing import Iterator, Dict, Optional, Type, TypeVar, Tuple
+from typing import Iterator, Dict, Optional, Type, TypeVar, Tuple, cast
+from enum import Enum
 from dataclasses import dataclass
 import z3
 
@@ -227,6 +228,11 @@ class TestOption(metaclass=TestOptionMeta):
     implementations: Set[Type["TestOption"]] = set()
     bindings: Dict[str, Type[BindTypes]] = dict()
 
+    class CountSpec(Enum):
+        ZERO_OR_ONE = 0
+        ANY = 1
+        EXACT_ONE = 2
+
     def __init_subclass__(cls, abstract=False, **kwargs):
         super().__init_subclass__(**kwargs)
         cls.implementations = set()
@@ -244,9 +250,9 @@ class TestOption(metaclass=TestOptionMeta):
                     f"'{cls.__name__}.{attrname}' is of type '{depcls!r}' "
                     f"(has to be a subclass of 'TestOption')"
                 )
-            elif count_spec == "EXACT_ONE":
+            elif count_spec == cls.CountSpec.EXACT_ONE:
                 cls.constraints.append(Implies(cls, ExactOne(depcls)))
-            elif count_spec == "ZERO_OR_ONE":
+            elif count_spec == cls.CountSpec.ZERO_OR_ONE:
                 cls.constraints.append(Implies(cls, No(depcls) | ExactOne(depcls)))
         if not abstract:
             cls.__register_at_parent_classes()
@@ -300,12 +306,12 @@ class TestOption(metaclass=TestOptionMeta):
         for attrname, depcls in cls.bindings.items():
             if get_origin(depcls) is Union and get_args(depcls)[1:2] == (type(None),):
                 depcls = get_args(depcls)[0]
-                count_spec = "ZERO_OR_ONE"
+                count_spec = cls.CountSpec.ZERO_OR_ONE
             elif get_origin(depcls) is set:
                 depcls = get_args(depcls)[0]
-                count_spec = "ANY"
+                count_spec = cls.CountSpec.ANY
             else:
-                count_spec = "EXACT_ONE"
+                count_spec = cls.CountSpec.EXACT_ONE
             result.add((attrname, depcls, count_spec))
         return result
 
@@ -338,7 +344,7 @@ class TestOption(metaclass=TestOptionMeta):
                         for impl in depcls.implementations
                         if impl in testoptions
                     }
-                    if count_spec == "ANY":
+                    if count_spec == cls.CountSpec.ANY:
                         setattr(to, attrname, impls)
                     else:
                         impl = impls.pop() if impls else None
