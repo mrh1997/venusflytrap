@@ -386,6 +386,11 @@ class TestTestOption:
 
         assert len(SiblingImpl.constraints) == 0
 
+    def test_requires_inDecoratorlessCall_ok(self):
+        impl_root, impl_dep = {type(f"Impl{c}", (TestOption,), {}) for c in range(2)}
+        requires(impl_dep, on=impl_root)
+        assert set(impl_root.constraints) == {Implies(impl_root, impl_dep)}
+
 
 class TestGenerateTestSetup:
     def create_impls(self, cnt: int, Base: Type[TestOption] = TestOption):
