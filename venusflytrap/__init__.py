@@ -1,5 +1,5 @@
 import functools
-from typing import List, Set, Union, Generic, FrozenSet
+from typing import List, Set, Union, Generic, FrozenSet, Tuple
 from typing import Iterator, Dict, Type, TypeVar, cast, Optional
 from enum import Enum
 from dataclasses import dataclass
@@ -205,6 +205,7 @@ class BindInfo:
         EXACT_ONE = 2
 
     type: "TestOption"
+
     count_spec: CountSpec = CountSpec.EXACT_ONE
 
 
@@ -222,21 +223,40 @@ def bind_set(type: Type[T]) -> Union[Set[T], Type[T]]:
     return cast(Type[T], result)
 
 
+class TestHandler:
+    pass
+
+
+TH = TypeVar("TH", bound=TestHandler)
+
+
+def handler(type: Type[TH]) -> Optional[TH]:
+    if not issubclass(type, TestHandler):
+        raise TypeError(f"'Expected subtype of 'TestHandler', got {type!r}")
+    return cast(Optional[TH], type)
+
+
+@dataclass
 class TestSetup(Generic[T]):
-    def __init__(
-        self, root: Type[T], testoptions: Dict[Type["TestOption"], "TestOption"]
-    ):
-        self.root = root
-        self.testoptions = testoptions
+    root: Type[T]
+    testoptions: Dict[Type["TestOption"], "TestOption"]
 
     @property
     def root_inst(self) -> T:
         return cast(T, self.testoptions[self.root])
 
-    def run(self) -> T:
+    def run(self, *testhandlers: "TestHandler") -> T:
+        handler_map = {type(h): h for h in testhandlers}
+        if len(testhandlers) != len(handler_map):
+            raise ValueError(
+                "All TestHandlers require unique type for correct identification"
+            )
         for impl in self.root.iter_dependencies():
             if impl in self.testoptions:
-                self.testoptions[impl].setup()
+                to = self.testoptions[impl]
+                for name, handler_cls in to.handlers.items():
+                    setattr(to, name, handler_map[handler_cls])
+                to.setup()
         self.root_inst.test()
         for impl in reversed(list(self.root.iter_dependencies())):
             if impl in self.testoptions:
@@ -250,25 +270,30 @@ class TestOption(metaclass=TestOptionMeta):
     constraints: List[Constraint] = []
     implementations: Set[Type["TestOption"]] = set()
     bindings: Dict[str, BindInfo] = dict()
+    handlers: Dict[str, Type[TestHandler]] = dict()
 
     def __init_subclass__(cls, abstract=False, **kwargs):
         super().__init_subclass__(**kwargs)
         cls.implementations = set()
         cls.constraints = cls.constraints[:]  # create copy
         cls.bindings = cls.bindings.copy()
+        cls.handlers = cls.handlers.copy()
         for nm, val in cls.__dict__.copy().items():
             if isinstance(val, BindInfo):
+                if not issubclass(val.type, TestOption):
+                    raise TypeError(
+                        f"'{cls.__name__}.{nm}' is of type '{val.type!r}' "
+                        f"(has to be a subclass of 'TestOption')"
+                    )
                 cls.bindings[nm] = val
                 setattr(cls, nm, val.type)
+            elif isinstance(val, type) and issubclass(val, TestHandler):
+                cls.handlers[nm] = val
+                setattr(cls, nm, None)
         cls.__z3var = z3.Bool(f"{cls.__name__}@{id(cls)}")
         cls.__abstract = abstract
         for attrname, binding in cls.bindings.items():
-            if not issubclass(binding.type, TestOption):
-                raise TypeError(
-                    f"'{cls.__name__}.{attrname}' is of type '{binding.type!r}' "
-                    f"(has to be a subclass of 'TestOption')"
-                )
-            elif binding.count_spec == BindInfo.CountSpec.EXACT_ONE:
+            if binding.count_spec == BindInfo.CountSpec.EXACT_ONE:
                 cls.constraints.append(Implies(cls, ExactOne(binding.type)))
             elif binding.count_spec == BindInfo.CountSpec.ZERO_OR_ONE:
                 cls.constraints.append(

@@ -14,6 +14,8 @@ from venusflytrap import (
     bind_set,
     UnsolvableError,
     TestSetup,
+    TestHandler,
+    handler,
     cast,
 )
 import z3  # type: ignore
@@ -259,6 +261,15 @@ class TestTestOption:
                 dep = bind(cast(Type[TestOption], int))
 
         assert "Impl.dep" in str(exc)
+
+    def test_create_onHandlers_setsAttrsToNone(self):
+        class MyHandler(TestHandler):
+            pass
+
+        class Impl(TestOption):
+            hndl = handler(MyHandler)
+
+        assert Impl.hndl is None
 
     def test_instanciate_onAbstractType_raisesNotImplementedError(self):
         class A(TestOption, abstract=True):
@@ -543,3 +554,50 @@ class TestGenerateTestSetup:
         ImplRoot.generate_testsetup().run()
         assert call_order[0] == "SETUP ImplChild2"
         assert call_order[-1] == "SETUP ImplRoot"
+
+    def test_run_onHandlers_setsAttrsToPassedHandlers(self):
+        class MyHandler1(TestHandler):
+            pass
+
+        class MyHandler2(TestHandler):
+            pass
+
+        class Impl(TestOption):
+            handler1 = handler(MyHandler1)
+            handler2 = handler(MyHandler2)
+
+        ts = Impl.generate_testsetup()
+        handlers = {MyHandler1(), MyHandler2()}
+        result = ts.run(*handlers)
+        assert {result.handler1, result.handler2} == handlers
+
+    def test_run_onHandlerInDependency_setsHandlerAttrOfDependency(self):
+        class MyHandler(TestHandler):
+            pass
+
+        class ChildImpl(TestOption):
+            handler = handler(MyHandler)
+
+        class Impl(TestOption):
+            dep = bind(ChildImpl)
+
+        ts = Impl.generate_testsetup()
+        myhandler = MyHandler()
+        result = ts.run(myhandler)
+        assert result.dep.handler is myhandler
+
+    def test_run_onPassingMultipleHandlersOfSameClass_raisesValueError(self):
+        class MyHandler(TestHandler):
+            pass
+
+        class Impl(TestOption):
+            hndl = handler(MyHandler)
+
+        with pytest.raises(ValueError):
+            Impl.generate_testsetup().run(MyHandler(), MyHandler())
+
+    def test_run_onNonHandlerParameter_raisesTypeError(self):
+        with pytest.raises(TypeError):
+
+            class Impl(TestOption):
+                hndl = handler(cast(Type[TestHandler], int))
