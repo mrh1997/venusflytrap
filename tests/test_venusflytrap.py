@@ -8,10 +8,15 @@ from venusflytrap import (
     Implies,
     Type,
     DisableAllExcept,
+    requires,
+    bind,
+    bind_optional,
+    bind_set,
+    UnsolvableError,
+    TestSetup,
+    cast,
 )
-from venusflytrap import requires, bind, UnsolvableError, TestSetup
-from typing import Optional, Set
-import z3
+import z3  # type: ignore
 
 
 class TestConstraint:
@@ -214,6 +219,47 @@ class TestTestOption:
 
         assert A.registered_children == {Impl1, Impl2}
 
+    def test_create_onBindings_addsConstraints(self):
+        class A(TestOption, abstract=True):
+            pass
+
+        class B(TestOption, abstract=True):
+            pass
+
+        class C(TestOption, abstract=True):
+            pass
+
+        class Impl(TestOption):
+            dep = bind(A)
+            opt_dep = bind_optional(B)
+            set_dep = bind_set(C)
+
+        assert set(Impl.constraints) == {
+            Implies(Impl, ExactOne(A)),
+            Implies(Impl, No(B) | ExactOne(B)),
+        }
+
+    def test_create_onBindings_setsAttrsToBindingTypes(self):
+        class A(TestOption, abstract=True):
+            pass
+
+        class Impl(TestOption):
+            dep = bind(A)
+            opt_dep = bind_optional(A)
+            set_dep = bind_set(A)
+
+        assert Impl.dep is A
+        assert Impl.opt_dep is A
+        assert Impl.set_dep is A
+
+    def test_create_onWrongAttrType_raiseMeaningfulTypeError(self):
+        with pytest.raises(TypeError) as exc:
+
+            class Impl(TestOption):
+                dep = bind(cast(Type[TestOption], int))
+
+        assert "Impl.dep" in str(exc)
+
     def test_instanciate_onAbstractType_raisesNotImplementedError(self):
         class A(TestOption, abstract=True):
             pass
@@ -232,61 +278,6 @@ class TestTestOption:
             pass
 
         assert set(A.iter_dependencies()) == set()
-
-    def test_create_onAttrWithoutImpls_fails(self):
-        class A(TestOption, abstract=True):
-            pass
-
-        class B(TestOption, abstract=True):
-            pass
-
-        class C(TestOption, abstract=True):
-            pass
-
-        class Impl(TestOption):
-            dep = bind(A)
-            opt_dep = bind(Optional[B])
-            set_dep = bind(Set[C])
-
-        assert set(Impl.constraints) == {
-            Implies(Impl, ExactOne(A)),
-            Implies(Impl, No(B) | ExactOne(B)),
-        }
-
-    def test_create_onWrongAttrType_raiseMeaningfulTypeError(self):
-        with pytest.raises(TypeError) as exc:
-
-            class Impl(TestOption):
-                dep = bind(int)
-
-        assert "Impl.dep" in str(exc)
-
-    def test_requiresDecorator_onAbstractClass_addsConstraintsToImpls(self):
-        a_constr, b_constr = Constraint(), Constraint()
-
-        @requires(a_constr)
-        class A(TestOption, abstract=True):
-            pass
-
-        @requires(b_constr)
-        class B(A):
-            pass
-
-        assert set(A.constraints) == {Implies(A, a_constr)}
-        assert set(B.constraints) == {Implies(A, a_constr), Implies(B, b_constr)}
-
-    def test_requiresDecorator_onImpl_doesNotModifyConstraintsOfSibling(self):
-        class A(TestOption, abstract=True):
-            pass
-
-        @requires(Constraint())
-        class Impl(A):
-            pass
-
-        class SiblingImpl(A):
-            pass
-
-        assert len(SiblingImpl.constraints) == 0
 
     def test_iterDependencies_onRecursiveDepenedencies_ok(self):
         class A(TestOption, abstract=True):
@@ -320,8 +311,8 @@ class TestTestOption:
             pass
 
         class C(TestOption):
-            opt_dep = bind(Optional[A])
-            set_dep = bind(Set[B])
+            opt_dep = bind_optional(A)
+            set_dep = bind_set(B)
 
         assert set(C.iter_dependencies()) == {C, ImplA, ImplB}
 
@@ -356,6 +347,33 @@ class TestTestOption:
         assert leaf == ImplLeaf
         assert set(middle) == {ImplMiddle1, ImplMiddle2}
         assert root == ImplRoot
+
+    def test_requiresDecorator_onAbstractClass_addsConstraintsToImpls(self):
+        a_constr, b_constr = Constraint(), Constraint()
+
+        @requires(a_constr)
+        class A(TestOption, abstract=True):
+            pass
+
+        @requires(b_constr)
+        class B(A):
+            pass
+
+        assert set(A.constraints) == {Implies(A, a_constr)}
+        assert set(B.constraints) == {Implies(A, a_constr), Implies(B, b_constr)}
+
+    def test_requiresDecorator_onImpl_doesNotModifyConstraintsOfSibling(self):
+        class A(TestOption, abstract=True):
+            pass
+
+        @requires(Constraint())
+        class Impl(A):
+            pass
+
+        class SiblingImpl(A):
+            pass
+
+        assert len(SiblingImpl.constraints) == 0
 
 
 class TestGenerateTestSetup:
@@ -410,7 +428,7 @@ class TestGenerateTestSetup:
             pass
 
         class Impl(TestOption):
-            dep = bind(Optional[A])
+            dep = bind_optional(A)
 
         ts = Impl.generate_testsetup().root_inst
         assert ts.dep is None
@@ -423,7 +441,7 @@ class TestGenerateTestSetup:
         implAs = {type("ImplA", (A,), {}) for c in range(impl_count)}
 
         class Impl(TestOption):
-            dep = bind(Set[A])
+            dep = bind_set(A)
 
         ts = Impl.generate_testsetup(*implAs).root_inst
         assert {type(to) for to in ts.dep} == implAs
@@ -497,7 +515,7 @@ class TestGenerateTestSetup:
 
         @requires(~ImplChild)
         class ImplRoot(Base):
-            dep = bind(Optional[ImplChild])
+            dep = bind_optional(ImplChild)
 
         call_order = []
         ImplRoot.generate_testsetup().run()

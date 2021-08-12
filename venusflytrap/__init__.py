@@ -1,9 +1,9 @@
 import functools
-from typing import get_origin, get_args, List, Set, Union, Generic, FrozenSet
-from typing import Iterator, Dict, Optional, Type, TypeVar, Tuple, cast
+from typing import List, Set, Union, Generic, FrozenSet
+from typing import Iterator, Dict, Type, TypeVar, cast, Optional
 from enum import Enum
 from dataclasses import dataclass
-import z3
+import z3  # type: ignore
 
 
 class UnsolvableError(Exception):
@@ -194,9 +194,32 @@ class TestOptionMeta(type, Constraint):
         yield self
 
 
-BindTypes = Union["TestOption", Set["TestOption"], Optional["TestOption"]]
-
 T = TypeVar("T", bound="TestOption")
+
+
+@dataclass
+class BindInfo:
+    class CountSpec(Enum):
+        ZERO_OR_ONE = 0
+        ANY = 1
+        EXACT_ONE = 2
+
+    type: "TestOption"
+    count_spec: CountSpec = CountSpec.EXACT_ONE
+
+
+def bind(type: Type[T]) -> Union[T, Type[T]]:
+    return cast(Type[T], BindInfo(type))
+
+
+def bind_optional(type: Type[T]) -> Union[Optional[T], Type[T]]:
+    result = BindInfo(type, BindInfo.CountSpec.ZERO_OR_ONE)
+    return cast(Type[T], result)
+
+
+def bind_set(type: Type[T]) -> Union[Set[T], Type[T]]:
+    result = BindInfo(type, BindInfo.CountSpec.ANY)
+    return cast(Type[T], result)
 
 
 class TestSetup(Generic[T]):
@@ -208,7 +231,7 @@ class TestSetup(Generic[T]):
 
     @property
     def root_inst(self) -> T:
-        return self.testoptions[self.root]
+        return cast(T, self.testoptions[self.root])
 
     def run(self) -> T:
         for impl in self.root.iter_dependencies():
@@ -226,12 +249,7 @@ class TestOption(metaclass=TestOptionMeta):
     __abstract = True
     constraints: List[Constraint] = []
     implementations: Set[Type["TestOption"]] = set()
-    bindings: Dict[str, Type[BindTypes]] = dict()
-
-    class CountSpec(Enum):
-        ZERO_OR_ONE = 0
-        ANY = 1
-        EXACT_ONE = 2
+    bindings: Dict[str, BindInfo] = dict()
 
     def __init_subclass__(cls, abstract=False, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -239,21 +257,23 @@ class TestOption(metaclass=TestOptionMeta):
         cls.constraints = cls.constraints[:]  # create copy
         cls.bindings = cls.bindings.copy()
         for nm, val in cls.__dict__.copy().items():
-            if isinstance(val, Bind):
-                delattr(cls, nm)
-                cls.bindings[nm] = val.testoption_type
+            if isinstance(val, BindInfo):
+                cls.bindings[nm] = val
+                setattr(cls, nm, val.type)
         cls.__z3var = z3.Bool(f"{cls.__name__}@{id(cls)}")
         cls.__abstract = abstract
-        for attrname, depcls, count_spec in cls._direct_dependencies():
-            if not issubclass(depcls, TestOption):
+        for attrname, binding in cls.bindings.items():
+            if not issubclass(binding.type, TestOption):
                 raise TypeError(
-                    f"'{cls.__name__}.{attrname}' is of type '{depcls!r}' "
+                    f"'{cls.__name__}.{attrname}' is of type '{binding.type!r}' "
                     f"(has to be a subclass of 'TestOption')"
                 )
-            elif count_spec == cls.CountSpec.EXACT_ONE:
-                cls.constraints.append(Implies(cls, ExactOne(depcls)))
-            elif count_spec == cls.CountSpec.ZERO_OR_ONE:
-                cls.constraints.append(Implies(cls, No(depcls) | ExactOne(depcls)))
+            elif binding.count_spec == BindInfo.CountSpec.EXACT_ONE:
+                cls.constraints.append(Implies(cls, ExactOne(binding.type)))
+            elif binding.count_spec == BindInfo.CountSpec.ZERO_OR_ONE:
+                cls.constraints.append(
+                    Implies(cls, No(binding.type) | ExactOne(binding.type))
+                )
         if not abstract:
             cls.__register_at_parent_classes()
 
@@ -290,32 +310,16 @@ class TestOption(metaclass=TestOptionMeta):
             if impl in collected_deps:
                 continue
             collected_deps.add(impl)
-            for _, direct_depcls, _ in impl._direct_dependencies():
-                if direct_depcls not in collected_deps:
-                    yield from direct_depcls.iter_dependencies(collected_deps)
+            for binding in impl.bindings.values():
+                if binding.type not in collected_deps:
+                    yield from binding.type.iter_dependencies(collected_deps)
             for constr in impl.constraints:
                 for constr_depcls in constr:
                     if constr_depcls not in collected_deps:
                         yield from constr_depcls.iter_dependencies(collected_deps)
             yield impl
 
-    @classmethod
-    @functools.lru_cache()
-    def _direct_dependencies(cls) -> Set[Tuple[str, Type["TestOption"], str]]:
-        result = set()
-        for attrname, depcls in cls.bindings.items():
-            if get_origin(depcls) is Union and get_args(depcls)[1:2] == (type(None),):
-                depcls = get_args(depcls)[0]
-                count_spec = cls.CountSpec.ZERO_OR_ONE
-            elif get_origin(depcls) is set:
-                depcls = get_args(depcls)[0]
-                count_spec = cls.CountSpec.ANY
-            else:
-                count_spec = cls.CountSpec.EXACT_ONE
-            result.add((attrname, depcls, count_spec))
-        return result
-
-    T = TypeVar("T")
+    T = TypeVar("T", bound="TestOption")
 
     @classmethod
     def generate_testsetup(cls: Type[T], *constrs: Constraint) -> TestSetup[T]:
@@ -338,16 +342,16 @@ class TestOption(metaclass=TestOptionMeta):
 
         def bind_instances(testoptions: Dict[Type[TestOption], TestOption]):
             for to in testoptions.values():
-                for attrname, depcls, count_spec in to._direct_dependencies():
-                    impls = {
+                for attrname, binding in to.bindings.items():
+                    bound_testoptions = {
                         testoptions[impl]
-                        for impl in depcls.implementations
+                        for impl in binding.type.implementations
                         if impl in testoptions
                     }
-                    if count_spec == cls.CountSpec.ANY:
-                        setattr(to, attrname, impls)
+                    if binding.count_spec == BindInfo.CountSpec.ANY:
+                        setattr(to, attrname, bound_testoptions)
                     else:
-                        impl = impls.pop() if impls else None
+                        impl = bound_testoptions.pop() if bound_testoptions else None
                         setattr(to, attrname, impl)
 
         testoptions = instanciate_matching_testoptions()
@@ -362,15 +366,3 @@ class TestOption(metaclass=TestOptionMeta):
 
     def teardown(self):
         pass
-
-
-TB = TypeVar("TB")
-
-
-@dataclass
-class Bind:
-    testoption_type: BindTypes
-
-
-def bind(testoption_type: Type[TB]) -> TB:
-    return Bind(testoption_type)
