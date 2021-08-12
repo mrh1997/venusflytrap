@@ -1,5 +1,14 @@
 import pytest
-from venusflytrap import TestOption, Constraint, ExactOne, No, Any, Implies, Type
+from venusflytrap import (
+    TestOption,
+    Constraint,
+    ExactOne,
+    No,
+    Any,
+    Implies,
+    Type,
+    DisableAllExcept,
+)
 from venusflytrap import requires, bind, UnsolvableError, TestSetup
 from typing import Optional, Set
 import z3
@@ -84,15 +93,14 @@ class TestConstraint:
         class A(TestOption, abstract=True):
             pass
 
-        class Impl1(A):
-            pass
-
-        class Impl2(A):
-            pass
-
         assert ExactOne(A)._to_z3_formula() is ExactOne(A)._to_z3_formula()
         assert Any(A)._to_z3_formula() is Any(A)._to_z3_formula()
         assert No(A)._to_z3_formula() is No(A)._to_z3_formula()
+
+    def test_DisableAllExcept_onExceptions_setsAllExcludedImplsToDisable(self):
+        self.assert_solution(
+            {1, 2}, lambda A, I1, I2, I3: [I1, I2, DisableAllExcept(I1, I2, of=A)]
+        )
 
     def test_iter_onTestOption_returnsSelf(self):
         class A(TestOption, abstract=True):
@@ -116,6 +124,21 @@ class TestConstraint:
         assert set(iter(ExactOne(A))) == {A}
         assert set(iter(No(A))) == {A}
         assert set(iter(Any(A))) == {A}
+
+    def test_iter_onDisableAllExcept_returnsDisabledImpls(self):
+        class A(TestOption, abstract=True):
+            pass
+
+        class ImplExc(A):
+            pass
+
+        class ImplOk1(A):
+            pass
+
+        class ImplOk2(A):
+            pass
+
+        assert set(iter(DisableAllExcept(ImplExc, of=A))) == {ImplOk1, ImplOk2}
 
 
 class TestTestOption:
@@ -430,6 +453,13 @@ class TestGenerateTestSetup:
         with pytest.raises(UnsolvableError):
             Impl.generate_testsetup(~Impl)
 
+    def test_run_returnsInstanceOfRoot(self):
+        class Impl(TestOption):
+            pass
+
+        root_inst = Impl.generate_testsetup().run()
+        assert isinstance(root_inst, Impl)
+
     def test_run_callsSetupOfChildrenThenRunThenTearDownOfChildren(self):
         class Base(TestOption, abstract=True):
             def setup(self):
@@ -448,8 +478,7 @@ class TestGenerateTestSetup:
             dep = bind(ImplChild)
 
         call_order = []
-        root_inst = ImplRoot.generate_testsetup().run()
-        assert isinstance(root_inst, ImplRoot)
+        ImplRoot.generate_testsetup().run()
         assert call_order == [
             "SETUP ImplChild",
             "SETUP ImplRoot",
@@ -471,7 +500,7 @@ class TestGenerateTestSetup:
             dep = bind(Optional[ImplChild])
 
         call_order = []
-        root_inst = ImplRoot.generate_testsetup().run()
+        ImplRoot.generate_testsetup().run()
         assert call_order == ["SETUP ImplRoot"]
 
     def test_run_onMultipleRefsToChild_callsSetupOnlyOnce(self):
@@ -493,6 +522,6 @@ class TestGenerateTestSetup:
             dep2 = bind(ImplChild12)
 
         call_order = []
-        root_inst = ImplRoot.generate_testsetup().run()
+        ImplRoot.generate_testsetup().run()
         assert call_order[0] == "SETUP ImplChild2"
         assert call_order[-1] == "SETUP ImplRoot"

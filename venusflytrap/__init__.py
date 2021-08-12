@@ -1,5 +1,5 @@
 import functools
-from typing import get_origin, get_args, List, Set, Union, Generic
+from typing import get_origin, get_args, List, Set, Union, Generic, FrozenSet
 from typing import Iterator, Dict, Optional, Type, TypeVar, Tuple
 from dataclasses import dataclass
 import z3
@@ -147,6 +147,34 @@ class ExactOne(Constraint):
 
     def __iter__(self):
         yield self.op
+
+
+@dataclass(frozen=True)
+class DisableAllExcept(Constraint):
+    exc_cls_list: FrozenSet[Type["TestOption"]]
+    base_cls: Type["TestOption"]
+
+    def __init__(self, *exc_cls_list, of=None):
+        # this is a workaround required for __init__ in frozen dataclasses:
+        # https://docs.python.org/3/library/dataclasses.html#frozen-instances
+        if of is None:
+            ValueError("DisableAllExcept() has to be called with 'of' parameter")
+        object.__setattr__(self, "exc_cls_list", frozenset(exc_cls_list))
+        object.__setattr__(self, "base_cls", of)
+
+    def __repr__(self):
+        return (
+            f"{self.__class__.__name__}("
+            f"{', '.join(c.__name__ for c in self.exc_cls_list)}, "
+            f"of={self.base_cls.__name__})"
+        )
+
+    @functools.lru_cache
+    def _to_z3_formula(self):
+        return z3.And(*[z3.Not(c._to_z3_formula()) for c in self])
+
+    def __iter__(self):
+        return iter(self.base_cls.implementations - self.exc_cls_list)
 
 
 def requires(constraint: Constraint):
