@@ -1,5 +1,4 @@
 import pytest
-import pytest
 from venusflytrap import (
     TestOption,
     Constraint,
@@ -20,191 +19,179 @@ from venusflytrap import (
     avail_impls,
 )
 import z3  # type: ignore
-from typing import cast
+from typing import cast, Set
+
+
+# provide tbe following class tree as fixtures:
+# Base
+# +- Impl1
+# +- Impl2
+# +- Impl3
+
+
+@pytest.fixture
+def Base() -> Type["TestOption"]:
+    class Base(TestOption, abstract=True):
+        pass
+
+    return Base
+
+
+@pytest.fixture
+def Impl1(Base) -> Type["TestOption"]:
+    class Impl1(Base):
+        pass
+
+    return Impl1
+
+
+@pytest.fixture
+def Impl2(Base) -> Type["TestOption"]:
+    class Impl2(Base):
+        pass
+
+    return Impl2
+
+
+@pytest.fixture
+def Impl3(Base) -> Type["TestOption"]:
+    class Impl1(Base):
+        pass
+
+    return Impl1
+
+
+def assert_constr(*constraints, expect=None):
+    s = z3.Solver()
+    s.add(*[c._to_z3_formula() for c in constraints])
+    assert s.check() == z3.sat, "Constraint is not satisfiable"
+    m = s.model()
+    for impl, expected_state in (expect or {}).items():
+        err_text = f"'{impl!r}' is {not expected_state} instead of {expected_state}"
+        assert m[impl._to_z3_formula()] == expected_state, err_text
+
+
+def assert_constr_fail(*constraints):
+    s = z3.Solver()
+    s.add(*[c._to_z3_formula() for c in constraints])
+    assert s.check() == z3.unsat, "Constraint is satisfiable"
 
 
 class TestConstraint:
-    def assert_solution(self, solution, expr_under_test):
-        class A(TestOption, abstract=True):
+    def test_Not(self, Impl1):
+        assert_constr(~Impl1, expect={Impl1: False})
+        assert_constr_fail(~Impl1, Impl1)
+
+    def test_And(self, Impl1, Impl2):
+        assert_constr(Impl1 & Impl2, expect={Impl1: True, Impl2: True})
+        assert_constr_fail(Impl1 & Impl2, ~Impl1)
+
+    def test_Or(self, Impl1, Impl2):
+        assert_constr(Impl1 | Impl2, Impl1, Impl2)
+        assert_constr(Impl1 | Impl2, ~Impl1, expect={Impl2: True})
+        assert_constr(Impl1 | Impl2, ~Impl2, expect={Impl1: True})
+        assert_constr_fail(Impl1 | Impl2, ~Impl1, ~Impl2)
+
+    def test_Xor(self, Impl1, Impl2):
+        assert_constr(Impl1 ^ Impl2, ~Impl1, expect={Impl2: True})
+        assert_constr(Impl1 ^ Impl2, Impl1, expect={Impl2: False})
+        assert_constr_fail(Impl1 ^ Impl2, ~Impl1, ~Impl2)
+        assert_constr_fail(Impl1 ^ Impl2, Impl1, Impl2)
+
+    def test_create_createsBoolVarWithUniqueName(self, Base, Impl1):
+        _Impl1 = Impl1
+
+        class Impl1(Base):
             pass
 
-        impls = []
-        for c in range(expr_under_test.__code__.co_argcount - 1):
+        assert_constr(Impl1, ~_Impl1)  # this is not a contradiction!
 
-            class Impl(A):
-                pass
+    def test_Implies(self, Impl1, Impl2):
+        assert_constr(Implies(Impl1, Impl2), ~Impl1, Impl2)
+        assert_constr(Implies(Impl1, Impl2), ~Impl1, ~Impl2)
+        assert_constr(Implies(Impl1, Impl2), Impl1, expect={Impl2: True})
+        assert_constr_fail(Implies(Impl1, Impl2), Impl1, ~Impl2)
 
-            impls.append(Impl)
+    def test_No(self, Base, Impl1, Impl2, Impl3):
+        assert_constr(No(Base), expect={Impl1: False, Impl2: False, Impl3: False})
+        assert_constr_fail(No(Base), Impl2)
 
-        s = z3.Solver()
-        s.add(*[i._to_z3_formula() for i in expr_under_test(A, *impls)])
-        if s.check() == z3.unsat:
-            raise ValueError()
-        else:
-            m = s.model()
-            for ndx, impl in enumerate(impls, 1):
-                exp_val = ndx in solution
-                err_text = f"'I{ndx}' is {not exp_val} instead of {exp_val}"
-                assert m[impl._to_z3_formula()] == exp_val, err_text
+    def test_Any(self, Base, Impl1, Impl2, Impl3):
+        assert_constr(Any(Base), ~Impl1, ~Impl3, expect={Impl2: True})
+        assert_constr(Any(Base), Impl1, Impl2)
 
-    def assert_nosolution(self, expr_under_test):
-        try:
-            self.assert_solution({}, expr_under_test)
-        except ValueError:
-            pass
-        else:
-            raise AssertionError("expected unsatisfiable solution")
+    def test_ExactOne(self, Base, Impl1, Impl2, Impl3):
+        assert_constr(ExactOne(Base), Impl1, expect={Impl2: False, Impl3: False})
+        assert_constr(ExactOne(Base), ~Impl1, ~Impl2, expect={Impl3: True})
+        assert_constr_fail(ExactOne(Base), Impl1, Impl2)
 
-    def test_create_createsBoolVarWithUniqueName(self):
-        class Impl(TestOption):
-            pass
+    def test_SetOps_onMultipleCalls_optimizeByReturnsSameResult(
+        self, Base, Impl1, Impl2
+    ):
+        assert ExactOne(Base)._to_z3_formula() is ExactOne(Base)._to_z3_formula()
+        assert Any(Base)._to_z3_formula() is Any(Base)._to_z3_formula()
+        assert No(Base)._to_z3_formula() is No(Base)._to_z3_formula()
 
-        OldImpl = Impl
-
-        class Impl(TestOption):
-            pass
-
-        s = z3.Solver()
-        s.add(z3.Xor(OldImpl._to_z3_formula(), Impl._to_z3_formula()))
-        assert s.check() == z3.sat
-
-    def test_operators_onImplementations_ok(self):
-        self.assert_solution({1, 2}, lambda A, I1, I2: [I1 & I2])
-        self.assert_solution({2}, lambda A, I1, I2: [~I1, I1 | I2])
-
-    def test_operators_onImplies_ok(self):
-        self.assert_solution({1, 2}, lambda A, I1, I2: [I1, Implies(I1, I2)])
-        self.assert_solution({2}, lambda A, I1, I2: [~I1, I2, Implies(I1, I2)])
-        self.assert_solution({}, lambda A, I1, I2: [~I1, ~I2, Implies(I1, I2)])
-
-    def test_No_onAbstractClassWithUndecidedImpls_ok(self):
-        self.assert_solution({}, lambda A, I1, I2, I3: [No(A)])
-
-    def test_No_onAbstractClassWithASetImpls_unsatisfiable(self):
-        self.assert_nosolution(lambda A, I1, I2, I3: [I2, No(A)])
-
-    def test_Any_onAbstractClassWithAllImplsDisabled_unsatisfiable(self):
-        self.assert_nosolution(lambda A, I1: [~I1, Any(A)])
-
-    def test_Any_onAbstractClassWithAllImplsDisabled_Ok(self):
-        self.assert_nosolution(lambda A, I1, I2: [~I1, ~I2, Any(A)])
-
-    def test_ExactOne_onAbstractClassWithoutImpls_unsatisfiable(self):
-        self.assert_nosolution(lambda A: [ExactOne(A)])
-
-    def test_ExactOne_onAbstractClassWithUndecidedImpls_ok(self):
-        self.assert_solution({2}, lambda A, I1, I2, I3: [I2, ExactOne(A)])
-
-    def test_ExactOne_onAbstractClassWithTwoAlreadySetImpls_unsatisfiable(self):
-        self.assert_nosolution(lambda A, I1, I2: [~I1, ~I2, ExactOne(A)])
-
-    def test_ExactOne_onMultipleCalls_optimizeByReturnsSameResult(self):
-        class A(TestOption, abstract=True):
-            pass
-
-        assert ExactOne(A)._to_z3_formula() is ExactOne(A)._to_z3_formula()
-        assert Any(A)._to_z3_formula() is Any(A)._to_z3_formula()
-        assert No(A)._to_z3_formula() is No(A)._to_z3_formula()
-
-    def test_DisableAllExcept_onExceptions_setsAllExcludedImplsToDisable(self):
-        self.assert_solution(
-            {1, 2}, lambda A, I1, I2, I3: [I1, I2, DisableAllExcept(I1, I2, of=A)]
+    def test_DisableAllExcept(self, Base, Impl1, Impl2, Impl3):
+        assert_constr(
+            DisableAllExcept(Impl1, Impl2, of=Base), Impl1, Impl2, expect={Impl3: False}
         )
 
-    def test_iter_onTestOption_returnsSelf(self):
-        class A(TestOption, abstract=True):
-            pass
+    def test_iter_onTestOption_returnsSelf(self, Base, Impl1):
+        assert set(iter(Base)) == {Base}
+        assert set(iter(Impl1)) == {Impl1}
 
-        assert set(iter(A)) == {A}
-
-    def test_iter_onLogicalOps_returnsOps(self):
-        class Impl1(TestOption):
-            pass
-
-        class Impl2(TestOption):
-            pass
-
+    def test_iter_onLogicalOperators_returnsOperands(self, Impl1, Impl2):
         assert set(iter(Impl1 & ~Impl2)) == {Impl1, Impl2}
 
-    def test_iter_onAbstractClassOps_returnsAbstractCls(self):
-        class A(TestOption):
+    def test_iter_onSetOps_returnsAbstractCls(self, Base, Impl1):
+        assert set(iter(ExactOne(Base))) == {Base}
+        assert set(iter(No(Base))) == {Base}
+        assert set(iter(Any(Base))) == {Base}
+
+    def test_iter_onDisableAllExcept_returnsDisabledImpls(
+        self, Base, Impl1, Impl2, Impl3
+    ):
+        assert set(iter(DisableAllExcept(Impl2, of=Base))) == {Impl1, Impl3}
+
+
+class Test_TestOption:
+    def test_create_onAbstractWithoutImplementations_setImplementationsEmpty(
+        self, Base
+    ):
+        assert Base.implementations == set()
+
+    def test_create_onImplementation_setImplementationsToSelf(self, Impl1):
+        assert Impl1.implementations == {Impl1}
+
+    def test_create_onMultipleAbstractBases_addsSelfToBasesImplementationLists(
+        self, Base
+    ):
+        class Base2(TestOption, abstract=True):
             pass
 
-        assert set(iter(ExactOne(A))) == {A}
-        assert set(iter(No(A))) == {A}
-        assert set(iter(Any(A))) == {A}
-
-    def test_iter_onDisableAllExcept_returnsDisabledImpls(self):
-        class A(TestOption, abstract=True):
+        class Impl(Base, Base2):
             pass
 
-        class ImplExc(A):
+        assert all(cls.implementations == {Impl} for cls in [Base, Base2])
+
+    def test_create_onMulipleImplementations_addsAllToBaseClassImplementations(
+        self, Base, Impl1, Impl2
+    ):
+        assert Base.implementations == {Impl1, Impl2}
+
+    def test_create_onBaseHierarchy_maintainsDifferentImplPerBase(self, Base, Impl1):
+        class Base2(Base, abstract=True):
             pass
 
-        class ImplOk1(A):
+        class Impl21(Base2):
             pass
 
-        class ImplOk2(A):
-            pass
-
-        assert set(iter(DisableAllExcept(ImplExc, of=A))) == {ImplOk1, ImplOk2}
-
-
-class TestTestOption:
-    def test_create_onAbstractWithoutImplementations_setImplementationsEmpty(self):
-        class A(TestOption, abstract=True):
-            pass
-
-        assert A.implementations == set()
-
-    def test_create_onImplementation_setImplementationsToSelf(self):
-        class Impl(TestOption):
-            pass
-
-        assert Impl.implementations == {Impl}
-
-    def test_create_onMultipleAbstractBases_addsSelfToBasesImplementationLists(self):
-        class A(TestOption, abstract=True):
-            pass
-
-        class B(TestOption, abstract=True):
-            pass
-
-        class Impl(A, B):
-            pass
-
-        assert all(cls.implementations == {Impl} for cls in [A, B])
-
-    def test_create_onMulipleImplementations_addsAllToBaseClassImplementations(self):
-        class A(TestOption, abstract=True):
-            pass
-
-        class Impl1(A):
-            pass
-
-        class Impl2(A):
-            pass
-
-        assert A.implementations == {Impl1, Impl2}
-
-    def test_create_onParentHasMoreImplsThanChild_maintainsDifferentImplLists(self):
-        class A(TestOption, abstract=True):
-            pass
-
-        class B(A, abstract=True):
-            pass
-
-        class ImplA(A):
-            pass
-
-        class ImplB(B):
-            pass
-
-        assert A.implementations == {ImplA, ImplB}
-        assert B.implementations == {ImplB}
+        assert Base.implementations == {Impl1, Impl21}
+        assert Base2.implementations == {Impl21}
 
     def test_create_onImplementation_callsRegisterImplementionOnAllParentClasses(self):
-        class A(TestOption, abstract=True):
+        class Base(TestOption, abstract=True):
             registered_children = set()
 
             @classmethod
@@ -212,35 +199,32 @@ class TestTestOption:
                 super().register_implementation(impl_cls)
                 cls.registered_children.add(impl_cls)
 
-        class B(A, abstract=True):
+        class Base2(Base, abstract=True):
             pass
 
-        class Impl1(B):
+        class Impl21(Base2):
             pass
 
-        class Impl2(B):
+        class Impl22(Base2):
             pass
 
-        assert A.registered_children == {Impl1, Impl2}
+        assert Base.registered_children == {Impl21, Impl22}
 
-    def test_create_onBindings_addsConstraints(self):
-        class A(TestOption, abstract=True):
+    def test_create_onBindings_addsConstraints(self, Base):
+        class Base2(TestOption, abstract=True):
             pass
 
-        class B(TestOption, abstract=True):
-            pass
-
-        class C(TestOption, abstract=True):
+        class Base3(TestOption, abstract=True):
             pass
 
         class Impl(TestOption):
-            dep = bind(A)
-            opt_dep = bind_optional(B)
-            set_dep = bind_set(C)
+            dep = bind(Base)
+            opt_dep = bind_optional(Base2)
+            set_dep = bind_set(Base3)
 
         assert set(Impl.constraints) == {
-            Implies(Impl, ExactOne(A)),
-            Implies(Impl, No(B) | ExactOne(B)),
+            Implies(Impl, ExactOne(Base)),
+            Implies(Impl, No(Base2) | ExactOne(Base2)),
         }
 
     def test_create_onWrongAttrType_raiseMeaningfulTypeError(self):
@@ -260,66 +244,42 @@ class TestTestOption:
 
         assert Impl.hndl is None
 
-    def test_instanciate_onAbstractType_raisesNotImplementedError(self):
-        class A(TestOption, abstract=True):
-            pass
-
+    def test_instanciate_onAbstractType_raisesNotImplementedError(self, Base):
         with pytest.raises(NotImplementedError):
-            A()
+            Base()
 
-    def test_iterDependencies_onImplType_returnsOnlySelf(self):
-        class Impl(TestOption):
+    def test_iterDependencies_onImplType_returnsOnlySelf(self, Impl1):
+        assert set(Impl1.iter_dependencies()) == {Impl1}
+
+    def test_iterDependencies_onAbstractType_returnsEmpty(self, Base):
+        assert set(Base.iter_dependencies()) == set()
+
+    def test_iterDependencies_onRecursiveDepenedencies_ok(self, Base, Impl1):
+        class Base2(TestOption, abstract=True):
             pass
 
-        assert set(Impl.iter_dependencies()) == {Impl}
+        class Impl2(Base2):
+            dep = bind(Base)
 
-    def test_iterDependencies_onAbstractType_returnsEmpty(self):
-        class A(TestOption, abstract=True):
+        class Impl3(TestOption):
+            dep = bind(Base2)
+
+        assert set(Impl3.iter_dependencies()) == {Impl1, Impl2, Impl3}
+
+    def test_iterDependencies_onOptionalAndSetAttrs_ok(self, Base, Impl1):
+        class Base2(TestOption, abstract=True):
             pass
 
-        assert set(A.iter_dependencies()) == set()
-
-    def test_iterDependencies_onRecursiveDepenedencies_ok(self):
-        class A(TestOption, abstract=True):
+        class Impl2(Base2):
             pass
 
-        class B(TestOption, abstract=True):
-            pass
+        class Impl3(TestOption):
+            opt_dep = bind_optional(Base)
+            set_dep = bind_set(Base2)
 
-        class ImplA(A):
-            pass
+        assert set(Impl3.iter_dependencies()) == {Impl1, Impl2, Impl3}
 
-        class ImplB(B):
-            dep = bind(A)
-
-        class ImplC(TestOption):
-            dep = bind(B)
-
-        assert set(ImplC.iter_dependencies()) == {ImplA, ImplB, ImplC}
-
-    def test_iterDependencies_onOptionalAndSetAttrs_ok(self):
-        class A(TestOption, abstract=True):
-            pass
-
-        class ImplA(A):
-            pass
-
-        class B(TestOption, abstract=True):
-            pass
-
-        class ImplB(B):
-            pass
-
-        class C(TestOption):
-            opt_dep = bind_optional(A)
-            set_dep = bind_set(B)
-
-        assert set(C.iter_dependencies()) == {C, ImplA, ImplB}
-
-    def test_iterDependencies_onReferredByConstraintsOnly_addedToList(self):
-        class Impl1(TestOption):
-            pass
-
+    def test_iterDependencies_onReferredByConstraintsOnly_addedToList(self, Impl1):
         class Impl2(TestOption):
             dep = bind(Impl1)
 
@@ -329,66 +289,35 @@ class TestTestOption:
 
         assert set(Impl3.iter_dependencies()) == {Impl1, Impl2, Impl3}
 
-    def test_iterDependencies_orderedFromLeafToRoot(self):
-        class ImplLeaf(TestOption):
-            pass
-
+    def test_iterDependencies_orderedFromLeafToRoot(self, Impl1):
         class ImplMiddle1(TestOption):
-            dep = bind(ImplLeaf)
+            dep = bind(Impl1)
 
         class ImplMiddle2(TestOption):
-            dep = bind(ImplLeaf)
+            dep = bind(Impl1)
 
         class ImplRoot(TestOption):
             dep1 = bind(ImplMiddle2)
             dep2 = bind(ImplMiddle1)
 
         leaf, *middle, root = list(ImplRoot.iter_dependencies())
-        assert leaf == ImplLeaf
+        assert leaf == Impl1
         assert set(middle) == {ImplMiddle1, ImplMiddle2}
         assert root == ImplRoot
 
-    def test_requiresDecorator_onAbstractClass_addsConstraintsToImpls(self):
-        a_constr, b_constr = Constraint(), Constraint()
+    def test_requiresDecorator_onAbstractClass_addsConstraintsToImpls(self, Base):
+        base_constr, impl1_constr = Constraint(), Constraint()
+        requires(base_constr, by=Base)
 
-        @requires(a_constr)
-        class A(TestOption, abstract=True):
-            pass
-
-        @requires(b_constr)
-        class B(A):
-            pass
-
-        assert set(A.constraints) == {Implies(A, a_constr)}
-        assert set(B.constraints) == {Implies(A, a_constr), Implies(B, b_constr)}
-
-    def test_requiresDecorator_onImpl_doesNotModifyConstraintsOfSibling(self):
-        class A(TestOption, abstract=True):
-            pass
-
-        @requires(Constraint())
-        class Impl(A):
-            pass
-
-        class SiblingImpl(A):
-            pass
-
-        assert len(SiblingImpl.constraints) == 0
-
-    def test_requires_inDecoratorlessCall_ok(self):
-        impl_root, impl_dep = {type(f"Impl{c}", (TestOption,), {}) for c in range(2)}
-        requires(impl_dep, on=impl_root)
-        assert set(impl_root.constraints) == {Implies(impl_root, impl_dep)}
-
-    def test_domain_onBoundType_returnsAllImpls(self):
-        class Base(TestOption, abstract=True):
-            pass
-
+        @requires(impl1_constr)
         class Impl1(Base):
             pass
 
-        class Impl2(Base):
-            pass
+        assert set(Base.constraints) == {Implies(Base, base_constr)}
+        assert set(Impl1.constraints) == {
+            Implies(Base, base_constr),
+            Implies(Impl1, impl1_constr),
+        }
 
     def test_requiresDecorator_onImpl_doesNotModifyConstraintsOfSibling(
         self, Base, Impl1, Impl2
@@ -408,14 +337,6 @@ class TestTestOption:
 
 
 class TestGenerateTestSetup:
-    def create_impls(self, cnt: int, Base: Type[TestOption] = TestOption):
-        for c in range(cnt):
-
-            class Impl(Base):
-                pass
-
-            yield Impl
-
     def test_generateTestsetup_instanciatesTestSetup(self):
         class Impl(TestOption):
             def __init__(self):
@@ -427,87 +348,72 @@ class TestGenerateTestSetup:
         assert ts.root_inst.val == 123
 
     def test_generateTestsetup_instanciatesAndLinksDependendImpls(self):
-        class A(TestOption, abstract=True):
+        class Base(TestOption, abstract=True):
             val = 1
 
-        class ImplA(A):
+        class Impl1(Base):
             def __init__(self):
                 super().__init__()
                 self.val = 123
 
-        class Impl(TestOption):
-            dep = bind(A)
+        class Impl2(TestOption):
+            dep = bind(Base)
 
-        ts = Impl.generate_testsetup().root_inst
+        ts = Impl2.generate_testsetup().root_inst
         assert ts.dep.val == 123
 
-    def test_generateTestsetup_onAdditionalConstraints_instantiatesImpls(self):
-        class A(TestOption, abstract=True):
-            def __init__(self):
-                nonlocal inst_count
-                super().__init__()
-                inst_count += 1
+    def test_generateTestsetup_onAdditionalConstraints_instantiatesImpls(
+        self, Base, Impl1, Impl2, Impl3
+    ):
+        def base_init(self):
+            nonlocal inst_count
+            super(Base, self).__init__()
+            inst_count += 1
 
-        implAs = list(self.create_impls(10, A))
-
+        Base.__init__ = base_init
         inst_count = 0
-        implAs[0].generate_testsetup(implAs[1] & implAs[2], implAs[4])
-        assert inst_count == 4
+        Impl1.generate_testsetup(~Impl2, Impl3)
+        assert inst_count == 2
 
-    def test_generateTestsetup_onOptionalDepAndNoImpl_setsDepToNone(self):
-        class A(TestOption, abstract=True):
-            pass
-
+    def test_generateTestsetup_onOptionalDepAndNoImpl_setsDepToNone(self, Base):
         class Impl(TestOption):
-            dep = bind_optional(A)
+            dep = bind_optional(Base)
 
         ts = Impl.generate_testsetup().root_inst
         assert ts.dep is None
 
     @pytest.mark.parametrize("impl_count", [0, 1, 2])
-    def test_generateTestsetup_onSetDep_returnsSet(self, impl_count):
-        class A(TestOption, abstract=True):
-            pass
+    def test_generateTestsetup_onSetDep_returnsSet(self, impl_count, Base):
+        impls = {type("Impl", (Base,), {}) for c in range(impl_count)}
 
-        implAs = {type("ImplA", (A,), {}) for c in range(impl_count)}
+        class ImplDep(TestOption):
+            dep = bind_set(Base)
 
-        class Impl(TestOption):
-            dep = bind_set(A)
+        ts = ImplDep.generate_testsetup(*impls).root_inst
+        assert {type(to) for to in ts.dep} == impls
 
-        ts = Impl.generate_testsetup(*implAs).root_inst
-        assert {type(to) for to in ts.dep} == implAs
-
-    def test_generateTestsetup_onSelectExactOneImpl_ok(self):
-        class A(TestOption, abstract=True):
-            pass
-
-        def __init__(self):
+    def test_generateTestsetup_onSelectExactOneImpl_ok(self, Base):
+        def impl_init(self):
             nonlocal inst_cnt
             inst_cnt += 1
 
-        implAs = [type("ImplA", (A,), {"__init__": __init__}) for c in range(10)]
+        impls = [type("Impl", (Base,), {"__init__": impl_init}) for c in range(10)]
 
-        class Impl(TestOption):
-            dep = bind(A)
+        class ImplDep(TestOption):
+            dep = bind(Base)
 
         inst_cnt = 0
-        ts = Impl.generate_testsetup().root_inst
-        assert isinstance(ts.dep, tuple(implAs))
+        ts = ImplDep.generate_testsetup().root_inst
+        assert isinstance(ts.dep, tuple(impls))
         assert inst_cnt == 1
 
-    def test_generateInstance_onUnsolvable_raisesUnsolvableError(self):
-        class Impl(TestOption):
-            pass
-
+    def test_generateInstance_onUnsolvable_raisesUnsolvableError(self, Impl1):
         with pytest.raises(UnsolvableError):
-            Impl.generate_testsetup(~Impl)
+            Impl1.generate_testsetup(~Impl1)
 
-    def test_run_returnsInstanceOfRoot(self):
-        class Impl(TestOption):
-            pass
-
-        root_inst = Impl.generate_testsetup().run()
-        assert isinstance(root_inst, Impl)
+    def test_run_returnsInstanceOfRoot(self, Impl1):
+        root_inst = Impl1.generate_testsetup().run()
+        assert isinstance(root_inst, Impl1)
 
     def test_run_callsSetupOfChildrenThenRunThenTearDownOfChildren(self):
         class Base(TestOption, abstract=True):

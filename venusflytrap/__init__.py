@@ -178,8 +178,8 @@ class DisableAllExcept(Constraint):
         return iter(self.base_cls.implementations - self.exc_cls_list)
 
 
-def requires(constraint: Constraint, *, on: Optional[Type["TestOption"]] = None):
-    if on is None:
+def requires(constraint: Constraint, *, by: Optional[Type["TestOption"]] = None):
+    if by is None:
 
         def decorator(cls: Type[TestOption]):
             cls.constraints.append(Implies(cls, constraint))
@@ -187,7 +187,7 @@ def requires(constraint: Constraint, *, on: Optional[Type["TestOption"]] = None)
 
         return decorator
     else:
-        on.constraints.append(Implies(on, constraint))
+        by.constraints.append(Implies(by, constraint))
 
 
 class TestOptionMeta(type, Constraint):
