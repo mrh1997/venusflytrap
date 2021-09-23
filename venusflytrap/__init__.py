@@ -1,5 +1,5 @@
 import functools
-from typing import List, Set, Union, Generic, FrozenSet, Tuple
+from typing import List, Set, Union, Generic, FrozenSet
 from typing import Iterator, Dict, Type, TypeVar, cast, Optional
 from enum import Enum
 from dataclasses import dataclass
@@ -201,30 +201,45 @@ class TestOptionMeta(type, Constraint):
 T = TypeVar("T", bound="TestOption")
 
 
+class CountSpec(Enum):
+    ZERO_OR_ONE = 0
+    ANY = 1
+    EXACT_ONE = 2
+
+
 @dataclass
 class BindInfo:
-    class CountSpec(Enum):
-        ZERO_OR_ONE = 0
-        ANY = 1
-        EXACT_ONE = 2
-
-    type: "TestOption"
-
-    count_spec: CountSpec = CountSpec.EXACT_ONE
+    type: Type["TestOption"]
+    count_spec: CountSpec
 
 
-def bind(type: Type[T]) -> Union[T, Type[T]]:
-    return cast(Type[T], BindInfo(type))
+def bind(type: Type[T]) -> T:
+    return cast(T, BindInfo(type, CountSpec.EXACT_ONE))
 
 
-def bind_optional(type: Type[T]) -> Union[Optional[T], Type[T]]:
-    result = BindInfo(type, BindInfo.CountSpec.ZERO_OR_ONE)
-    return cast(Type[T], result)
+def bind_optional(type: Type[T]) -> Optional[T]:
+    return cast(Optional[T], BindInfo(type, CountSpec.ZERO_OR_ONE))
 
 
-def bind_set(type: Type[T]) -> Union[Set[T], Type[T]]:
-    result = BindInfo(type, BindInfo.CountSpec.ANY)
-    return cast(Type[T], result)
+def bind_set(type: Type[T]) -> Set[T]:
+    return cast(Set[T], BindInfo(type, CountSpec.ANY))
+
+
+def avail_impls(bound_attr: Union[T, Set[T], None]) -> Set[T]:
+    """
+    Returns all available subclasses that are available for the passed
+    attribute.
+
+    bound_attr has to be a class attribute that was setup via bind(),
+    bind_optional() or bind_set().
+    """
+    if isinstance(bound_attr, (type(None), set, TestOption)):
+        raise ValueError(
+            "implementations() works only at class level, "
+            "not on attributes of instiated classes"
+        )
+    bind_info = cast(BindInfo, bound_attr)
+    return cast(Set[T], bind_info.type.implementations)
 
 
 class TestHandler:
@@ -290,16 +305,15 @@ class TestOption(metaclass=TestOptionMeta):
                         f"(has to be a subclass of 'TestOption')"
                     )
                 cls.bindings[nm] = val
-                setattr(cls, nm, val.type)
             elif isinstance(val, type) and issubclass(val, TestHandler):
                 cls.handlers[nm] = val
                 setattr(cls, nm, None)
         cls.__z3var = z3.Bool(f"{cls.__name__}@{id(cls)}")
         cls.__abstract = abstract
         for attrname, binding in cls.bindings.items():
-            if binding.count_spec == BindInfo.CountSpec.EXACT_ONE:
+            if binding.count_spec == CountSpec.EXACT_ONE:
                 cls.constraints.append(Implies(cls, ExactOne(binding.type)))
-            elif binding.count_spec == BindInfo.CountSpec.ZERO_OR_ONE:
+            elif binding.count_spec == CountSpec.ZERO_OR_ONE:
                 cls.constraints.append(
                     Implies(cls, No(binding.type) | ExactOne(binding.type))
                 )
@@ -377,7 +391,7 @@ class TestOption(metaclass=TestOptionMeta):
                         for impl in binding.type.implementations
                         if impl in testoptions
                     }
-                    if binding.count_spec == BindInfo.CountSpec.ANY:
+                    if binding.count_spec == CountSpec.ANY:
                         setattr(to, attrname, bound_testoptions)
                     else:
                         impl = bound_testoptions.pop() if bound_testoptions else None

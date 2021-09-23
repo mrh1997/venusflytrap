@@ -1,4 +1,5 @@
 import pytest
+import pytest
 from venusflytrap import (
     TestOption,
     Constraint,
@@ -16,9 +17,10 @@ from venusflytrap import (
     TestSetup,
     TestHandler,
     handler,
-    cast,
+    avail_impls,
 )
 import z3  # type: ignore
+from typing import cast
 
 
 class TestConstraint:
@@ -241,19 +243,6 @@ class TestTestOption:
             Implies(Impl, No(B) | ExactOne(B)),
         }
 
-    def test_create_onBindings_setsAttrsToBindingTypes(self):
-        class A(TestOption, abstract=True):
-            pass
-
-        class Impl(TestOption):
-            dep = bind(A)
-            opt_dep = bind_optional(A)
-            set_dep = bind_set(A)
-
-        assert Impl.dep is A
-        assert Impl.opt_dep is A
-        assert Impl.set_dep is A
-
     def test_create_onWrongAttrType_raiseMeaningfulTypeError(self):
         with pytest.raises(TypeError) as exc:
 
@@ -390,6 +379,32 @@ class TestTestOption:
         impl_root, impl_dep = {type(f"Impl{c}", (TestOption,), {}) for c in range(2)}
         requires(impl_dep, on=impl_root)
         assert set(impl_root.constraints) == {Implies(impl_root, impl_dep)}
+
+    def test_domain_onBoundType_returnsAllImpls(self):
+        class Base(TestOption, abstract=True):
+            pass
+
+        class Impl1(Base):
+            pass
+
+        class Impl2(Base):
+            pass
+
+    def test_requiresDecorator_onImpl_doesNotModifyConstraintsOfSibling(
+        self, Base, Impl1, Impl2
+    ):
+        requires(Constraint(), by=Impl1)
+        assert len(Impl2.constraints) == 0
+
+    def test_availImpls_onBoundType_returnsAllImpls(self, Base, Impl1, Impl2):
+        class UserOfBase(TestOption):
+            dep = bind(Base)
+            dep_optional = bind_optional(Base)
+            dep_set = bind_set(Base)
+
+        assert avail_impls(UserOfBase.dep) == {Impl1, Impl2}
+        assert avail_impls(UserOfBase.dep_optional) == {Impl1, Impl2}
+        assert avail_impls(UserOfBase.dep_set) == {Impl1, Impl2}
 
 
 class TestGenerateTestSetup:
@@ -606,3 +621,20 @@ class TestGenerateTestSetup:
 
             class Impl(TestOption):
                 hndl = handler(cast(Type[TestHandler], int))
+
+    def test_availImpls_onInstance_raisesValuError(self):
+        class Impl(TestOption):
+            pass
+
+        class UserOfImpl(TestOption):
+            dep = bind(Impl)
+            dep_optional = bind_optional(Impl)
+            dep_set = bind_set(Impl)
+
+        ts = UserOfImpl.generate_testsetup()
+        with pytest.raises(ValueError):
+            avail_impls(ts.root_inst)
+        with pytest.raises(ValueError):
+            avail_impls(ts.root_inst)
+        with pytest.raises(ValueError):
+            avail_impls(ts.root_inst)
