@@ -44,6 +44,19 @@ class And(Constraint):
 
 
 @dataclass(frozen=True)
+class And(Constraint):
+    op1: Constraint
+    op2: Constraint
+
+    def _to_z3_formula(self):
+        return z3.And(self.op1._to_z3_formula(), self.op2._to_z3_formula())
+
+    def __iter__(self):
+        yield from self.op1
+        yield from self.op2
+
+
+@dataclass(frozen=True)
 class Not(Constraint):
     op: Constraint
 
@@ -87,6 +100,19 @@ class Implies(Constraint):
 
     def _to_z3_formula(self):
         return z3.Implies(self.op1._to_z3_formula(), self.op2._to_z3_formula())
+
+    def __iter__(self):
+        yield from self.op1
+        yield from self.op2
+
+
+@dataclass(frozen=True)
+class Equal(Constraint):
+    op1: Constraint
+    op2: Constraint
+
+    def _to_z3_formula(self):
+        return self.op1._to_z3_formula() == self.op2._to_z3_formula()
 
     def __iter__(self):
         yield from self.op1
@@ -178,6 +204,18 @@ def requires(constraint: Constraint, *, by: Optional[Type["TestOption"]] = None)
         return decorator
     else:
         by.constraints.append(Implies(by, constraint))
+
+
+def link(constraint: Constraint, testoption: Optional[Type["TestOption"]] = None):
+    if testoption is None:
+
+        def decorator(cls: Type[TestOption]):
+            cls.constraints.append(Equal(cls, constraint))
+            return cls
+
+        return decorator
+    else:
+        testoption.constraints.append(Equal(testoption, constraint))
 
 
 class TestOptionMeta(type, Constraint):

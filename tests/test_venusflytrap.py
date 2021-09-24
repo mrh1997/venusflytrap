@@ -2,15 +2,16 @@ import pytest
 from venusflytrap import (
     TestOption,
     Constraint,
-    ExactOne,
     No,
     Any,
     All,
     MaxOne,
     ExactOne,
     Implies,
+    Equal,
     Type,
     requires,
+    link,
     bind,
     bind_optional,
     bind_set,
@@ -116,12 +117,19 @@ class TestConstraint:
         assert_constr(Implies(Impl1, Impl2), Impl1, expect={Impl2: True})
         assert_constr_fail(Implies(Impl1, Impl2), Impl1, ~Impl2)
 
+    def test_Linked(self, Impl1, Impl2):
+        assert_constr(Equal(Impl1, Impl2), ~Impl1, expect={Impl2: False})
+        assert_constr(Equal(Impl1, Impl2), Impl1, expect={Impl2: True})
+        assert_constr_fail(Equal(Impl1, Impl2), ~Impl1, Impl2)
+
     def test_iter_onTestOption_returnsSelf(self, Base, Impl1):
         assert set(iter(Base)) == {Base}
         assert set(iter(Impl1)) == {Impl1}
 
     def test_iter_onLogicalOperators_returnsOperands(self, Impl1, Impl2):
         assert set(iter(Impl1 & ~Impl2)) == {Impl1, Impl2}
+        assert set(iter(Implies(Impl1, Impl2))) == {Impl1, Impl2}
+        assert set(iter(Equal(Impl1, Impl2))) == {Impl1, Impl2}
 
     @pytest.mark.parametrize("operator", SETOPS)
     def test_iter_onSetOps_returnsAllImplementations(
@@ -342,7 +350,21 @@ class Test_TestOption:
             Implies(Impl1, impl1_constr),
         }
 
-    def test_requiresDecorator_onImpl_doesNotModifyConstraintsOfSibling(
+    def test_linksDecorator_onAbstractClass_addsConstraintsToImpls(self, Base):
+        base_constr, impl1_constr = Constraint(), Constraint()
+        link(base_constr, Base)
+
+        @link(impl1_constr)
+        class Impl1(Base):
+            pass
+
+        assert set(Base.constraints) == {Equal(Base, base_constr)}
+        assert set(Impl1.constraints) == {
+            Equal(Base, base_constr),
+            Equal(Impl1, impl1_constr),
+        }
+
+    def test_constraintDecorator_onImpl_doesNotModifyConstraintsOfSibling(
         self, Base, Impl1, Impl2
     ):
         requires(Constraint(), by=Impl1)
