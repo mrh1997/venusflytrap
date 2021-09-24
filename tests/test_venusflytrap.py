@@ -5,9 +5,11 @@ from venusflytrap import (
     ExactOne,
     No,
     Any,
+    All,
+    MaxOne,
+    ExactOne,
     Implies,
     Type,
-    DisableAllExcept,
     requires,
     bind,
     bind_optional,
@@ -55,10 +57,10 @@ def Impl2(Base) -> Type["TestOption"]:
 
 @pytest.fixture
 def Impl3(Base) -> Type["TestOption"]:
-    class Impl1(Base):
+    class Impl3(Base):
         pass
 
-    return Impl1
+    return Impl3
 
 
 def assert_constr(*constraints, expect=None):
@@ -78,6 +80,16 @@ def assert_constr_fail(*constraints):
 
 
 class TestConstraint:
+
+    SETOPS = [No, Any, All, ExactOne, MaxOne]
+
+    def test_toZ3Formula_onAbstractClass_raisesValueError(self, Base):
+        with pytest.raises(ValueError):
+            Base._to_z3_formula()
+
+    def test_toZ3Formula_onImplementation_returnsBoolRef(self, Impl1):
+        assert isinstance(Impl1._to_z3_formula(), z3.BoolRef)
+
     def test_Not(self, Impl1):
         assert_constr(~Impl1, expect={Impl1: False})
         assert_constr_fail(~Impl1, Impl1)
@@ -98,44 +110,11 @@ class TestConstraint:
         assert_constr_fail(Impl1 ^ Impl2, ~Impl1, ~Impl2)
         assert_constr_fail(Impl1 ^ Impl2, Impl1, Impl2)
 
-    def test_create_createsBoolVarWithUniqueName(self, Base, Impl1):
-        _Impl1 = Impl1
-
-        class Impl1(Base):
-            pass
-
-        assert_constr(Impl1, ~_Impl1)  # this is not a contradiction!
-
     def test_Implies(self, Impl1, Impl2):
         assert_constr(Implies(Impl1, Impl2), ~Impl1, Impl2)
         assert_constr(Implies(Impl1, Impl2), ~Impl1, ~Impl2)
         assert_constr(Implies(Impl1, Impl2), Impl1, expect={Impl2: True})
         assert_constr_fail(Implies(Impl1, Impl2), Impl1, ~Impl2)
-
-    def test_No(self, Base, Impl1, Impl2, Impl3):
-        assert_constr(No(Base), expect={Impl1: False, Impl2: False, Impl3: False})
-        assert_constr_fail(No(Base), Impl2)
-
-    def test_Any(self, Base, Impl1, Impl2, Impl3):
-        assert_constr(Any(Base), ~Impl1, ~Impl3, expect={Impl2: True})
-        assert_constr(Any(Base), Impl1, Impl2)
-
-    def test_ExactOne(self, Base, Impl1, Impl2, Impl3):
-        assert_constr(ExactOne(Base), Impl1, expect={Impl2: False, Impl3: False})
-        assert_constr(ExactOne(Base), ~Impl1, ~Impl2, expect={Impl3: True})
-        assert_constr_fail(ExactOne(Base), Impl1, Impl2)
-
-    def test_SetOps_onMultipleCalls_optimizeByReturnsSameResult(
-        self, Base, Impl1, Impl2
-    ):
-        assert ExactOne(Base)._to_z3_formula() is ExactOne(Base)._to_z3_formula()
-        assert Any(Base)._to_z3_formula() is Any(Base)._to_z3_formula()
-        assert No(Base)._to_z3_formula() is No(Base)._to_z3_formula()
-
-    def test_DisableAllExcept(self, Base, Impl1, Impl2, Impl3):
-        assert_constr(
-            DisableAllExcept(Impl1, Impl2, of=Base), Impl1, Impl2, expect={Impl3: False}
-        )
 
     def test_iter_onTestOption_returnsSelf(self, Base, Impl1):
         assert set(iter(Base)) == {Base}
@@ -144,15 +123,59 @@ class TestConstraint:
     def test_iter_onLogicalOperators_returnsOperands(self, Impl1, Impl2):
         assert set(iter(Impl1 & ~Impl2)) == {Impl1, Impl2}
 
-    def test_iter_onSetOps_returnsAbstractCls(self, Base, Impl1):
-        assert set(iter(ExactOne(Base))) == {Base}
-        assert set(iter(No(Base))) == {Base}
-        assert set(iter(Any(Base))) == {Base}
-
-    def test_iter_onDisableAllExcept_returnsDisabledImpls(
-        self, Base, Impl1, Impl2, Impl3
+    @pytest.mark.parametrize("operator", SETOPS)
+    def test_iter_onSetOps_returnsAllImplementations(
+        self, Base, Impl1, Impl2, operator
     ):
-        assert set(iter(DisableAllExcept(Impl2, of=Base))) == {Impl1, Impl3}
+        assert set(operator(Base)) == {Impl1, Impl2}
+
+    @pytest.mark.parametrize("operator", SETOPS)
+    def test_iter_onSetOpsWithExcludingFilter_returnsAllImplementationsExceptSpecifiedOnes(
+        self, Base, Impl1, Impl2, Impl3, operator
+    ):
+        assert set(operator(Base, excluding={Impl2, Impl3})) == {Impl1}
+
+    @pytest.mark.parametrize("operator", SETOPS)
+    def test_iter_onSetOpsWithWhereFilter_returnsAllImplementationsMatchingWhereFunc(
+        self, Base, Impl1, Impl2, Impl3, operator
+    ):
+        assert set(operator(Base, where=lambda i: i.__name__ >= "Impl2")) == {
+            Impl2,
+            Impl3,
+        }
+
+    def test_No(self, Base, Impl1, Impl2, Impl3):
+        assert_constr(No(Base), expect={Impl1: False, Impl2: False, Impl3: False})
+        assert_constr_fail(No(Base), Impl2)
+
+    def test_Any(self, Base, Impl1, Impl2, Impl3):
+        assert_constr(Any(Base), ~Impl1, ~Impl3, expect={Impl2: True})
+        assert_constr(Any(Base), Impl1, Impl2)
+        assert_constr_fail(Any(Base), ~Impl1, ~Impl2, ~Impl3)
+
+    def test_All(self, Base, Impl1, Impl2, Impl3):
+        assert_constr(All(Base), expect={Impl1: True, Impl2: True, Impl3: True})
+        assert_constr_fail(All(Base), ~Impl1)
+
+    def test_ExactOne(self, Base, Impl1, Impl2, Impl3):
+        assert_constr(ExactOne(Base), Impl1, expect={Impl2: False, Impl3: False})
+        assert_constr(ExactOne(Base), ~Impl1, ~Impl2, expect={Impl3: True})
+        assert_constr_fail(ExactOne(Base), Impl1, Impl2)
+
+    def test_ExactOne_onNoImplementations_fails(self, Base):
+        assert_constr_fail(ExactOne(Base))
+
+    def test_MaxOne(self, Base, Impl1, Impl2, Impl3):
+        assert_constr(MaxOne(Base), Impl1, expect={Impl2: False, Impl3: False})
+        assert_constr(MaxOne(Base), ~Impl1, ~Impl2, ~Impl3)
+        assert_constr_fail(MaxOne(Base), Impl1, Impl2)
+
+    def test_MaxOne_onNoImplementations_returnsTrue(self, Base):
+        assert_constr(MaxOne(Base))
+
+    @pytest.mark.parametrize("operator", SETOPS)
+    def test_SetOps_onMultipleCalls_optimizeByCachingResult(self, Impl1, operator):
+        assert operator(Impl1)._to_z3_formula() is operator(Impl1)._to_z3_formula()
 
 
 class Test_TestOption:

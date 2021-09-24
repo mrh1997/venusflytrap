@@ -1,5 +1,5 @@
 import functools
-from typing import List, Set, Union, Generic, FrozenSet
+from typing import List, Set, Union, Generic, FrozenSet, Callable
 from typing import Iterator, Dict, Type, TypeVar, cast, Optional
 from enum import Enum
 from dataclasses import dataclass
@@ -94,88 +94,78 @@ class Implies(Constraint):
 
 
 @dataclass(frozen=True)
-class No(Constraint):
+class SetOperator(Constraint):
     op: Type["TestOption"]
+    where: Optional[Callable[[Type["TestOption"]], bool]] = None
+    excluding: Optional[Set[Type["TestOption"]]] = None
 
+    def __iter__(self):
+        impls = self.op.implementations
+        if self.where:
+            impls = {i for i in impls if self.where(i)}
+        if self.excluding:
+            impls = impls - self.excluding
+        return iter(impls)
+
+
+@dataclass(frozen=True)
+class No(SetOperator):
     @functools.lru_cache
     def _to_z3_formula(self):
         return z3.And(
             *[z3.Not(impl._to_z3_formula()) for impl in self.op.implementations]
         )
 
-    def __iter__(self):
-        yield self.op
-
 
 @dataclass(frozen=True)
-class Any(Constraint):
-    op: Type["TestOption"]
-
+class Any(SetOperator):
     @functools.lru_cache
     def _to_z3_formula(self):
         return z3.Or(*[impl._to_z3_formula() for impl in self.op.implementations])
 
-    def __iter__(self):
-        yield self.op
+
+@dataclass(frozen=True)
+class All(SetOperator):
+    @functools.lru_cache
+    def _to_z3_formula(self):
+        return z3.And(*[c._to_z3_formula() for c in self])
+
+
+def _count_ones(z3_vars, start, end):
+    if end - start == 1:
+        return z3_vars[start], False
+    else:
+        exact_one1, more_than_one1 = _count_ones(z3_vars, start, (start + end) // 2)
+        exact_one2, more_than_one2 = _count_ones(z3_vars, (start + end) // 2, end)
+        more_than_one = z3.Or(
+            z3.And(exact_one1, exact_one2), more_than_one1, more_than_one2
+        )
+        exact_one = z3.And(z3.Xor(exact_one1, exact_one2), z3.Not(more_than_one))
+        return exact_one, more_than_one
 
 
 @dataclass(frozen=True)
-class ExactOne(Constraint):
-    op: Type["TestOption"]
-
+class MaxOne(SetOperator):
     @functools.lru_cache
     def _to_z3_formula(self):
-        def count_ones(start, end):
-            if end - start == 1:
-                return z3_vars[start], False
-            else:
-                exact_one1, more_than_one1 = count_ones(start, (start + end) // 2)
-                exact_one2, more_than_one2 = count_ones((start + end) // 2, end)
-                more_than_one = z3.Or(
-                    z3.And(exact_one1, exact_one2), more_than_one1, more_than_one2
-                )
-                exact_one = z3.And(
-                    z3.Xor(exact_one1, exact_one2), z3.Not(more_than_one)
-                )
-                return exact_one, more_than_one
+        z3_vars = [impl._to_z3_formula() for impl in self.op.implementations]
+        if len(z3_vars) == 0:
+            return True
+        else:
+            _, more_than_one = _count_ones(z3_vars, 0, len(z3_vars))
+            return z3.Not(more_than_one)
 
+
+@dataclass(frozen=True)
+class ExactOne(SetOperator):
+    @functools.lru_cache
+    def _to_z3_formula(self):
         z3_vars = [impl._to_z3_formula() for impl in self.op.implementations]
         if len(z3_vars) == 0:
             return False
         else:
-            exact_one, _ = count_ones(0, len(z3_vars))
+            exact_one, _ = _count_ones(z3_vars, 0, len(z3_vars))
             return exact_one
-
-    def __iter__(self):
-        yield self.op
-
-
-@dataclass(frozen=True)
-class DisableAllExcept(Constraint):
-    exc_cls_list: FrozenSet[Type["TestOption"]]
-    base_cls: Type["TestOption"]
-
-    def __init__(self, *exc_cls_list, of=None):
-        # this is a workaround required for __init__ in frozen dataclasses:
-        # https://docs.python.org/3/library/dataclasses.html#frozen-instances
-        if of is None:
-            ValueError("DisableAllExcept() has to be called with 'of' parameter")
-        object.__setattr__(self, "exc_cls_list", frozenset(exc_cls_list))
-        object.__setattr__(self, "base_cls", of)
-
-    def __repr__(self):
-        return (
-            f"{self.__class__.__name__}("
-            f"{', '.join(c.__name__ for c in self.exc_cls_list)}, "
-            f"of={self.base_cls.__name__})"
-        )
-
-    @functools.lru_cache
-    def _to_z3_formula(self):
-        return z3.And(*[z3.Not(c._to_z3_formula()) for c in self])
-
-    def __iter__(self):
-        return iter(self.base_cls.implementations - self.exc_cls_list)
 
 
 def requires(constraint: Constraint, *, by: Optional[Type["TestOption"]] = None):
@@ -284,7 +274,7 @@ class TestSetup(Generic[T]):
 
 
 class TestOption(metaclass=TestOptionMeta):
-    __z3var: z3.Bool
+    __z3var: Optional[z3.Bool] = None
     __abstract = True
     constraints: List[Constraint] = []
     implementations: Set[Type["TestOption"]] = set()
@@ -308,7 +298,8 @@ class TestOption(metaclass=TestOptionMeta):
             elif isinstance(val, type) and issubclass(val, TestHandler):
                 cls.handlers[nm] = val
                 setattr(cls, nm, None)
-        cls.__z3var = z3.Bool(f"{cls.__name__}@{id(cls)}")
+        if not abstract:
+            cls.__z3var = z3.Bool(f"{cls.__name__}@{id(cls)}")
         cls.__abstract = abstract
         for attrname, binding in cls.bindings.items():
             if binding.count_spec == CountSpec.EXACT_ONE:
@@ -342,7 +333,12 @@ class TestOption(metaclass=TestOptionMeta):
 
     @classmethod
     def _to_z3_formula(cls):
-        return cls.__z3var
+        if cls.__z3var is not None:
+            return cls.__z3var
+        else:
+            raise ValueError(
+                "Abstract TestOption classes cannot be converted to Z3 formulars"
+            )
 
     @classmethod
     def iter_dependencies(
