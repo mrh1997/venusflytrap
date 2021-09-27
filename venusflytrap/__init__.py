@@ -12,10 +12,10 @@ class UnsolvableError(Exception):
 
 class Constraint:
     def _to_z3_formula(self):
-        raise NotImplementedError("This is an abstract base class")
+        raise NotImplementedError("This is an abstract base class/group class")
 
     def __iter__(self):
-        raise NotImplementedError("This is an abstract base class")
+        raise NotImplementedError("This is an abstract base class/group class")
 
     def __and__(self, other: "Constraint"):
         return And(self, other)
@@ -313,13 +313,13 @@ class TestSetup(Generic[T]):
 
 class TestOption(metaclass=TestOptionMeta):
     __z3var: Optional[z3.Bool] = None
-    __abstract = True
+    __group = True
     constraints: List[Constraint] = []
     implementations: Set[Type["TestOption"]] = set()
     bindings: Dict[str, BindInfo] = dict()
     handlers: Dict[str, Type[TestHandler]] = dict()
 
-    def __init_subclass__(cls, abstract=False, **kwargs):
+    def __init_subclass__(cls, group=False, **kwargs):
         super().__init_subclass__(**kwargs)
         cls.implementations = set()
         cls.constraints = cls.constraints[:]  # create copy
@@ -336,9 +336,9 @@ class TestOption(metaclass=TestOptionMeta):
             elif isinstance(val, type) and issubclass(val, TestHandler):
                 cls.handlers[nm] = val
                 setattr(cls, nm, None)
-        if not abstract:
+        if not group:
             cls.__z3var = z3.Bool(f"{cls.__name__}@{id(cls)}")
-        cls.__abstract = abstract
+        cls.__group = group
         for attrname, binding in cls.bindings.items():
             if binding.count_spec == CountSpec.EXACT_ONE:
                 cls.constraints.append(Implies(cls, ExactOne(binding.type)))
@@ -346,22 +346,22 @@ class TestOption(metaclass=TestOptionMeta):
                 cls.constraints.append(
                     Implies(cls, No(binding.type) | ExactOne(binding.type))
                 )
-        if not abstract:
+        if not group:
             cls.__register_at_parent_classes()
 
     def __init__(self):
-        if self.__abstract:
+        if self.__group:
             raise NotImplementedError(
-                "This is an abstract TestOption which must not be instantiated"
+                "This is a TestOption group which must not be instantiated"
             )
 
     @classmethod
     def __register_at_parent_classes(cls):
         for basecls in cls.__mro__:
             if issubclass(basecls, TestOption) and basecls is not TestOption:
-                assert basecls is cls or basecls.__abstract, (
+                assert basecls is cls or basecls.__group, (
                     f"Baseclass {basecls!r} of {cls!r} "
-                    f"has to be marked as 'class ...(..., abstract=True):'"
+                    f"has to be marked as 'class ...(..., group=True):'"
                 )
                 basecls.register_implementation(cls)
 
@@ -374,9 +374,7 @@ class TestOption(metaclass=TestOptionMeta):
         if cls.__z3var is not None:
             return cls.__z3var
         else:
-            raise ValueError(
-                "Abstract TestOption classes cannot be converted to Z3 formulars"
-            )
+            raise ValueError("TestOption groups cannot be converted to Z3 formulars")
 
     @classmethod
     def iter_dependencies(

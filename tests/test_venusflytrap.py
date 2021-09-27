@@ -34,7 +34,7 @@ from typing import cast, Set
 
 @pytest.fixture
 def Base() -> Type["TestOption"]:
-    class Base(TestOption, abstract=True):
+    class Base(TestOption, group=True):
         pass
 
     return Base
@@ -84,7 +84,7 @@ class TestConstraint:
 
     SETOPS = [No, Any, All, ExactOne, MaxOne]
 
-    def test_toZ3Formula_onAbstractClass_raisesValueError(self, Base):
+    def test_toZ3Formula_onGroupClass_raisesValueError(self, Base):
         with pytest.raises(ValueError):
             Base._to_z3_formula()
 
@@ -187,18 +187,14 @@ class TestConstraint:
 
 
 class Test_TestOption:
-    def test_create_onAbstractWithoutImplementations_setImplementationsEmpty(
-        self, Base
-    ):
+    def test_create_onGroupWithoutImplementations_setImplementationsEmpty(self, Base):
         assert Base.implementations == set()
 
     def test_create_onImplementation_setImplementationsToSelf(self, Impl1):
         assert Impl1.implementations == {Impl1}
 
-    def test_create_onMultipleAbstractBases_addsSelfToBasesImplementationLists(
-        self, Base
-    ):
-        class Base2(TestOption, abstract=True):
+    def test_create_onMultipleGroupBases_addsSelfToBasesImplementationLists(self, Base):
+        class Base2(TestOption, group=True):
             pass
 
         class Impl(Base, Base2):
@@ -212,7 +208,7 @@ class Test_TestOption:
         assert Base.implementations == {Impl1, Impl2}
 
     def test_create_onBaseHierarchy_maintainsDifferentImplPerBase(self, Base, Impl1):
-        class Base2(Base, abstract=True):
+        class Base2(Base, group=True):
             pass
 
         class Impl21(Base2):
@@ -222,7 +218,7 @@ class Test_TestOption:
         assert Base2.implementations == {Impl21}
 
     def test_create_onImplementation_callsRegisterImplementionOnAllParentClasses(self):
-        class Base(TestOption, abstract=True):
+        class Base(TestOption, group=True):
             registered_children = set()
 
             @classmethod
@@ -230,7 +226,7 @@ class Test_TestOption:
                 super().register_implementation(impl_cls)
                 cls.registered_children.add(impl_cls)
 
-        class Base2(Base, abstract=True):
+        class Base2(Base, group=True):
             pass
 
         class Impl21(Base2):
@@ -242,10 +238,10 @@ class Test_TestOption:
         assert Base.registered_children == {Impl21, Impl22}
 
     def test_create_onBindings_addsConstraints(self, Base):
-        class Base2(TestOption, abstract=True):
+        class Base2(TestOption, group=True):
             pass
 
-        class Base3(TestOption, abstract=True):
+        class Base3(TestOption, group=True):
             pass
 
         class Impl(TestOption):
@@ -275,18 +271,18 @@ class Test_TestOption:
 
         assert Impl.hndl is None
 
-    def test_instanciate_onAbstractType_raisesNotImplementedError(self, Base):
+    def test_instanciate_onGroupType_raisesNotImplementedError(self, Base):
         with pytest.raises(NotImplementedError):
             Base()
 
     def test_iterDependencies_onImplType_returnsOnlySelf(self, Impl1):
         assert set(Impl1.iter_dependencies()) == {Impl1}
 
-    def test_iterDependencies_onAbstractType_returnsEmpty(self, Base):
+    def test_iterDependencies_onGroupType_returnsEmpty(self, Base):
         assert set(Base.iter_dependencies()) == set()
 
     def test_iterDependencies_onRecursiveDepenedencies_ok(self, Base, Impl1):
-        class Base2(TestOption, abstract=True):
+        class Base2(TestOption, group=True):
             pass
 
         class Impl2(Base2):
@@ -298,7 +294,7 @@ class Test_TestOption:
         assert set(Impl3.iter_dependencies()) == {Impl1, Impl2, Impl3}
 
     def test_iterDependencies_onOptionalAndSetAttrs_ok(self, Base, Impl1):
-        class Base2(TestOption, abstract=True):
+        class Base2(TestOption, group=True):
             pass
 
         class Impl2(Base2):
@@ -336,7 +332,7 @@ class Test_TestOption:
         assert set(middle) == {ImplMiddle1, ImplMiddle2}
         assert root == ImplRoot
 
-    def test_requiresDecorator_onAbstractClass_addsConstraintsToImpls(self, Base):
+    def test_requiresDecorator_onGroupClass_addsConstraintsToImpls(self, Base):
         base_constr, impl1_constr = Constraint(), Constraint()
         requires(base_constr, by=Base)
 
@@ -350,7 +346,7 @@ class Test_TestOption:
             Implies(Impl1, impl1_constr),
         }
 
-    def test_linksDecorator_onAbstractClass_addsConstraintsToImpls(self, Base):
+    def test_linksDecorator_onGroupClass_addsConstraintsToImpls(self, Base):
         base_constr, impl1_constr = Constraint(), Constraint()
         link(base_constr, Base)
 
@@ -393,7 +389,7 @@ class TestGenerateTestSetup:
         assert ts.root_inst.val == 123
 
     def test_generateTestsetup_instanciatesAndLinksDependendImpls(self):
-        class Base(TestOption, abstract=True):
+        class Base(TestOption, group=True):
             val = 1
 
         class Impl1(Base):
@@ -461,7 +457,7 @@ class TestGenerateTestSetup:
         assert isinstance(root_inst, Impl1)
 
     def test_run_callsSetupOfChildrenThenRunThenTearDownOfChildren(self):
-        class Base(TestOption, abstract=True):
+        class Base(TestOption, group=True):
             def setup(self):
                 call_order.append(f"SETUP {self.__class__.__name__}")
 
@@ -488,7 +484,7 @@ class TestGenerateTestSetup:
         ]
 
     def test_run_onDisabledImpls_callsSetupOfEnabledImplsOnly(self):
-        class Base(TestOption, abstract=True):
+        class Base(TestOption, group=True):
             def setup(self):
                 call_order.append(f"SETUP {self.__class__.__name__}")
 
@@ -504,7 +500,7 @@ class TestGenerateTestSetup:
         assert call_order == ["SETUP ImplRoot"]
 
     def test_run_onMultipleRefsToChild_callsSetupOnlyOnce(self):
-        class Base(TestOption, abstract=True):
+        class Base(TestOption, group=True):
             def setup(self):
                 call_order.append(f"SETUP {self.__class__.__name__}")
 
