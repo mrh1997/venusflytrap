@@ -1,9 +1,15 @@
 import functools
-from typing import List, Set, Union, Generic, FrozenSet, Callable
+from typing import List, Set, Union, Generic, Optional, Callable
 from typing import Iterator, Dict, Type, TypeVar, cast, Optional
 from enum import Enum
 from dataclasses import dataclass
 import z3  # type: ignore
+
+
+WeightFunc = Callable[[Type["TestOption"]], Optional[float]]
+
+
+WEIGHT_ENFORCE = -1
 
 
 class UnsolvableError(Exception):
@@ -314,12 +320,15 @@ class TestSetup(Generic[T]):
 class TestOption(metaclass=TestOptionMeta):
     __z3var: Optional[z3.Bool] = None
     __group = True
+    weigth: Optional[float] = None
     constraints: List[Constraint] = []
     implementations: Set[Type["TestOption"]] = set()
     bindings: Dict[str, BindInfo] = dict()
     handlers: Dict[str, Type[TestHandler]] = dict()
 
-    def __init_subclass__(cls, group=False, **kwargs):
+    def __init_subclass__(
+        cls, *, group: Optional[bool] = False, weight: Optional[float] = None, **kwargs
+    ):
         super().__init_subclass__(**kwargs)
         cls.implementations = set()
         cls.constraints = cls.constraints[:]  # create copy
@@ -336,8 +345,11 @@ class TestOption(metaclass=TestOptionMeta):
             elif isinstance(val, type) and issubclass(val, TestHandler):
                 cls.handlers[nm] = val
                 setattr(cls, nm, None)
+        if group and weight:
+            raise ValueError("TestOption group can have no weigth")
         if not group:
             cls.__z3var = z3.Bool(f"{cls.__name__}@{id(cls)}")
+        cls.weigth = weight
         cls.__group = group
         for attrname, binding in cls.bindings.items():
             if binding.count_spec == CountSpec.EXACT_ONE:
@@ -397,23 +409,34 @@ class TestOption(metaclass=TestOptionMeta):
     T = TypeVar("T", bound="TestOption")
 
     @classmethod
-    def generate_testsetup(cls: Type[T], *constrs: Constraint) -> TestSetup[T]:
+    def generate_testsetup(
+        cls: Type[T],
+        *constrs: Constraint,
+        weight_func: Optional[WeightFunc] = None,
+    ) -> TestSetup[T]:
         def instanciate_matching_testoptions():
             available_testoptions = set(cls.iter_dependencies())
-            solver = z3.Solver()
-            solver.add(cls._to_z3_formula())
+            solver = z3.Optimize()
+            solver.add(cls.__z3var)
             for constr in constrs:
                 solver.add(constr._to_z3_formula())
                 available_testoptions |= set(constr)
             for to in available_testoptions:
                 for constr in to.constraints:
                     solver.add(constr._to_z3_formula())
+                weight = weight_func(to) if weight_func else to.weigth
+                if weight == WEIGHT_ENFORCE:
+                    solver.add(to._to_z3_formula())
+                elif weight == 0:
+                    solver.add(z3.Not(to.__z3var))
+                elif weight is not None:
+                    if weight < 0.000001:
+                        raise ValueError("Weights < 0.000001 are not supported")
+                    solver.add_soft(to._to_z3_formula(), f"{weight:f}")
             if solver.check() != z3.sat:
                 raise UnsolvableError("Cannot solve constraints")
             model = solver.model()
-            return {
-                to: to() for to in available_testoptions if model[to._to_z3_formula()]
-            }
+            return {to: to() for to in available_testoptions if model[to.__z3var]}
 
         def bind_instances(testoptions: Dict[Type[TestOption], TestOption]):
             for to in testoptions.values():
@@ -429,6 +452,8 @@ class TestOption(metaclass=TestOptionMeta):
                         impl = bound_testoptions.pop() if bound_testoptions else None
                         setattr(to, attrname, impl)
 
+        if cls.__group:
+            raise UnsolvableError("Cannot generate TestSetup from TestOption group")
         testoptions = instanciate_matching_testoptions()
         bind_instances(testoptions)
         return TestSetup(cls, testoptions)

@@ -20,9 +20,11 @@ from venusflytrap import (
     TestHandler,
     handler,
     avail_impls,
+    WeightFunc,
+    WEIGHT_ENFORCE,
 )
 import z3  # type: ignore
-from typing import cast, Set
+from typing import List, Callable, cast
 
 
 # provide tbe following class tree as fixtures:
@@ -64,6 +66,14 @@ def Impl3(Base) -> Type["TestOption"]:
     return Impl3
 
 
+@pytest.fixture
+def ImplRoot(Base):
+    class ImplRoot(TestOption):
+        dep = bind_optional(Base)
+
+    return ImplRoot
+
+
 def assert_constr(*constraints, expect=None):
     s = z3.Solver()
     s.add(*[c._to_z3_formula() for c in constraints])
@@ -82,7 +92,7 @@ def assert_constr_fail(*constraints):
 
 class TestConstraint:
 
-    SETOPS = [No, Any, All, ExactOne, MaxOne]
+    SETOPS: List[Callable] = [No, Any, All, ExactOne, MaxOne]
 
     def test_toZ3Formula_onGroupClass_raisesValueError(self, Base):
         with pytest.raises(ValueError):
@@ -271,6 +281,12 @@ class Test_TestOption:
 
         assert Impl.hndl is None
 
+    def test_create_onGroupWithExplicitWeight_raisesValueError(self):
+        with pytest.raises(ValueError):
+
+            class Base(TestOption, group=True, weight=1.0):
+                pass
+
     def test_instanciate_onGroupType_raisesNotImplementedError(self, Base):
         with pytest.raises(NotImplementedError):
             Base()
@@ -378,7 +394,7 @@ class Test_TestOption:
 
 
 class TestGenerateTestSetup:
-    def test_generateTestsetup_instanciatesTestSetup(self):
+    def test_generateTestsetup_onImpl_instanciatesTestSetup(self):
         class Impl(TestOption):
             def __init__(self):
                 super().__init__()
@@ -387,6 +403,10 @@ class TestGenerateTestSetup:
         ts = Impl.generate_testsetup()
         assert isinstance(ts, TestSetup)
         assert ts.root_inst.val == 123
+
+    def test_generateTestsetup_onGroup_raisesUnsolvableError(self, Base):
+        with pytest.raises(UnsolvableError):
+            _ = Base.generate_testsetup()
 
     def test_generateTestsetup_instanciatesAndLinksDependendImpls(self):
         class Base(TestOption, group=True):
@@ -416,6 +436,10 @@ class TestGenerateTestSetup:
         Impl1.generate_testsetup(~Impl2, Impl3)
         assert inst_count == 2
 
+    def test_generateTestsetup_onRootUnavailable_raisesUnsolvableError(self, Impl1):
+        with pytest.raises(UnsolvableError):
+            _ = Impl1.generate_testsetup(~Impl1)
+
     def test_generateTestsetup_onOptionalDepAndNoImpl_setsDepToNone(self, Base):
         class Impl(TestOption):
             dep = bind_optional(Base)
@@ -433,22 +457,63 @@ class TestGenerateTestSetup:
         ts = ImplDep.generate_testsetup(*impls).root_inst
         assert {type(to) for to in ts.dep} == impls
 
-    def test_generateTestsetup_onSelectExactOneImpl_ok(self, Base):
+    def test_generateTestsetup_onSelectExactOneImpl_ok(self, Base, ImplRoot):
         def impl_init(self):
             nonlocal inst_cnt
             inst_cnt += 1
 
         impls = [type("Impl", (Base,), {"__init__": impl_init}) for c in range(10)]
 
-        class ImplDep(TestOption):
-            dep = bind(Base)
-
         inst_cnt = 0
-        ts = ImplDep.generate_testsetup().root_inst
+        ts = ImplRoot.generate_testsetup().root_inst
         assert isinstance(ts.dep, tuple(impls))
         assert inst_cnt == 1
 
-    def test_generateInstance_onUnsolvable_raisesUnsolvableError(self, Impl1):
+    @pytest.mark.parametrize("repeat", range(5))
+    def test_generateTestsetup_onWeightAsClassParameter_preferHigherWeightedTestsetups(
+        self, ImplRoot, Base, repeat
+    ):
+        class ImplLowWeight(Base, weight=0.5):
+            pass
+
+        class ImplHighWeight(Base, weight=2):
+            pass
+
+        ts = ImplRoot.generate_testsetup()
+        assert isinstance(ts.root_inst.dep, ImplHighWeight)
+
+    def test_generateTestsetup_onWeightFunc_overridesClassParameter(
+        self, ImplRoot, Base, Impl1, Impl2
+    ):
+        class ImplWeighted(Base, weight=0.5):
+            pass
+
+        weight_func = cast(WeightFunc, {ImplWeighted: 2.0}.get)
+        ts = ImplRoot.generate_testsetup(weight_func=weight_func)
+        assert isinstance(ts.root_inst.dep, ImplWeighted)
+
+    def test_generateTestsetup_onWeightIsForce_enforcesTestOption(
+        self, ImplRoot, Impl1, Impl2, Impl3
+    ):
+        weight_enforce = {Impl1: 1000000, Impl2: WEIGHT_ENFORCE}.get
+        ts = ImplRoot.generate_testsetup(weight_func=weight_enforce)
+        assert isinstance(ts.root_inst.dep, Impl2)
+
+    def test_generateTestsetup_onWeightIsZero_disablesTestOption(
+        self, ImplRoot, Impl1, Impl2, Impl3
+    ):
+        weight_disable = {Impl1: 0.0, Impl2: 0.0, Impl3: 0}.get
+        ts = ImplRoot.generate_testsetup(weight_func=weight_disable)
+        assert ts.root_inst.dep is None
+
+    def test_generateTestsetup_onWeightIsTooSmall_returnsValueError(
+        self, ImplRoot, Impl1
+    ):
+        with pytest.raises(ValueError):
+            too_low_weight = {Impl1: 0.0000001}.get
+            ts = ImplRoot.generate_testsetup(weight_func=too_low_weight)
+
+    def test_generateTestsetup_onUnsolvable_raisesUnsolvableError(self, Impl1):
         with pytest.raises(UnsolvableError):
             Impl1.generate_testsetup(~Impl1)
 
