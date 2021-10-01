@@ -1,4 +1,5 @@
 import pytest
+from unittest.mock import patch
 from venusflytrap import (
     TestOption,
     Constraint,
@@ -21,7 +22,6 @@ from venusflytrap import (
     handler,
     avail_impls,
     WeightFunc,
-    WEIGHT_ENFORCE,
 )
 import z3  # type: ignore
 from typing import List, Callable, cast
@@ -281,12 +281,6 @@ class Test_TestOption:
 
         assert Impl.hndl is None
 
-    def test_create_onGroupWithExplicitWeight_raisesValueError(self):
-        with pytest.raises(ValueError):
-
-            class Base(TestOption, group=True, weight=1.0):
-                pass
-
     def test_instanciate_onGroupType_raisesNotImplementedError(self, Base):
         with pytest.raises(NotImplementedError):
             Base()
@@ -392,6 +386,77 @@ class Test_TestOption:
         assert avail_impls(UserOfBase.dep_optional) == {Impl1, Impl2}
         assert avail_impls(UserOfBase.dep_set) == {Impl1, Impl2}
 
+    def test_getAbsoluteWeights_onImplWithoutExplicitWeight_returnsWeight1(self, Impl1):
+        abs_weights = Impl1.get_absolute_weights()
+        assert abs_weights[Impl1] == 1.0
+
+    def test_getAbsoluteWeights_onGroupWithoutExplicitWeight_returnsSumOfChildWeights(
+        self, Base, Impl1, Impl2, Impl3
+    ):
+        abs_weights = Base.get_absolute_weights()
+        assert abs_weights == {Base: 3.0, Impl1: 1.0, Impl2: 1.0, Impl3: 1.0}
+
+    def test_getAbsoluteWeights_onWeightSpecifiedAsClassParameter_returnsClassParameter(
+        self,
+    ):
+        class Impl(TestOption, weight=3.21):
+            pass
+
+        abs_weights = Impl.get_absolute_weights()
+        assert abs_weights == {Impl: 3.21}
+
+    def test_getAbsoluteWeights_onWeightSpecifiedAsWeightFunc_overridesClassParameter(
+        self,
+    ):
+        class Impl(TestOption, weight=3):
+            pass
+
+        weight_func = cast(WeightFunc, {Impl: 4.0}.get)
+        abs_weights = Impl.get_absolute_weights(weight_func=weight_func)
+        assert abs_weights == {Impl: 4}
+
+    def test_getAbsoluteWeights_onGroupHasWeight_scalesChildrenWeightSumToGroupWeight(
+        self, Base, Impl1, Impl2
+    ):
+        weight_func = {Base: 100, Impl1: 2, Impl2: 8}.get
+        abs_weights = Base.get_absolute_weights(weight_func=weight_func)
+        assert abs_weights == {Base: 100, Impl1: 20, Impl2: 80}
+
+    def test_getAbsoluteWeights_onGroupHasWeight_scalesOverMultipleLevels(self, Base):
+        class SubBase(Base, group=True):
+            pass
+
+        class Impl(SubBase):
+            pass
+
+        abs_weights = Base.get_absolute_weights(weight_func={Base: 10}.get)
+        assert abs_weights == {Base: 10, SubBase: 10, Impl: 10}
+
+    def test_getAbsoluteWeights_onGroupHasWeight_usesWeightForParentGroup(self, Base):
+        class SubBase(Base, group=True):
+            pass
+
+        class Impl(SubBase):
+            pass
+
+        weight_func = cast(WeightFunc, {SubBase: 10}.get)
+        abs_weights = Base.get_absolute_weights(weight_func=weight_func)
+        assert abs_weights == {Base: 10, SubBase: 10, Impl: 10}
+
+    def test_getAbsoluteWeights_onMultipleParentGroups_rescaleRecursivly(self, Base):
+        class SubBase(Base, group=True):
+            pass
+
+        class ImplSub(Base):
+            pass
+
+        class Impl(SubBase):
+            pass
+
+        weight_func = cast(WeightFunc, {Base: 100, SubBase: 9, ImplSub: 1}.get)
+        abs_weights = Base.get_absolute_weights(weight_func=weight_func)
+        assert abs_weights[Impl] == 90
+
 
 class TestGenerateTestSetup:
     def test_generateTestsetup_onImpl_instanciatesTestSetup(self):
@@ -469,42 +534,23 @@ class TestGenerateTestSetup:
         assert isinstance(ts.dep, tuple(impls))
         assert inst_cnt == 1
 
-    @pytest.mark.parametrize("repeat", range(5))
-    def test_generateTestsetup_onWeightAsClassParameter_preferHigherWeightedTestsetups(
-        self, ImplRoot, Base, repeat
+    @pytest.mark.parametrize("high_weight_testoption_ndx", [0, 1, 2])
+    def test_generateTestsetup_usesWeightsFromGetAbsoluteWeights(
+        self, ImplRoot, Impl1, Impl2, Impl3, high_weight_testoption_ndx
     ):
-        class ImplLowWeight(Base, weight=0.5):
-            pass
-
-        class ImplHighWeight(Base, weight=2):
-            pass
-
-        ts = ImplRoot.generate_testsetup()
-        assert isinstance(ts.root_inst.dep, ImplHighWeight)
-
-    def test_generateTestsetup_onWeightFunc_overridesClassParameter(
-        self, ImplRoot, Base, Impl1, Impl2
-    ):
-        class ImplWeighted(Base, weight=0.5):
-            pass
-
-        weight_func = cast(WeightFunc, {ImplWeighted: 2.0}.get)
-        ts = ImplRoot.generate_testsetup(weight_func=weight_func)
-        assert isinstance(ts.root_inst.dep, ImplWeighted)
-
-    def test_generateTestsetup_onWeightIsForce_enforcesTestOption(
-        self, ImplRoot, Impl1, Impl2, Impl3
-    ):
-        weight_enforce = {Impl1: 1000000, Impl2: WEIGHT_ENFORCE}.get
-        ts = ImplRoot.generate_testsetup(weight_func=weight_enforce)
-        assert isinstance(ts.root_inst.dep, Impl2)
-
-    def test_generateTestsetup_onWeightIsZero_disablesTestOption(
-        self, ImplRoot, Impl1, Impl2, Impl3
-    ):
-        weight_disable = {Impl1: 0.0, Impl2: 0.0, Impl3: 0}.get
-        ts = ImplRoot.generate_testsetup(weight_func=weight_disable)
-        assert ts.root_inst.dep is None
+        impls = [Impl1, Impl2, Impl3]
+        high_weight_testoption = impls[high_weight_testoption_ndx]
+        weight_map = dict.fromkeys(impls, 1.0)
+        weight_map[high_weight_testoption] = 2.0
+        with patch.object(
+            TestOption,
+            "get_absolute_weights",
+            return_value=weight_map,
+        ) as get_absolute_weights_mock:
+            wf = lambda i: 1
+            ts = ImplRoot.generate_testsetup(ImplRoot, ImplRoot, weight_func=wf)
+        get_absolute_weights_mock.assert_called_with(ImplRoot, ImplRoot, weight_func=wf)
+        assert isinstance(ts.root_inst.dep, cast(type, high_weight_testoption))
 
     def test_generateTestsetup_onWeightIsTooSmall_returnsValueError(
         self, ImplRoot, Impl1

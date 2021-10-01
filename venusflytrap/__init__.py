@@ -1,5 +1,5 @@
 import functools
-from typing import List, Set, Union, Generic, Optional, Callable
+from typing import List, Set, Union, Generic, Callable
 from typing import Iterator, Dict, Type, TypeVar, cast, Optional
 from enum import Enum
 from dataclasses import dataclass
@@ -7,9 +7,6 @@ import z3  # type: ignore
 
 
 WeightFunc = Callable[[Type["TestOption"]], Optional[float]]
-
-
-WEIGHT_ENFORCE = -1
 
 
 class UnsolvableError(Exception):
@@ -319,8 +316,8 @@ class TestSetup(Generic[T]):
 
 class TestOption(metaclass=TestOptionMeta):
     __z3var: Optional[z3.Bool] = None
-    __group = True
-    weigth: Optional[float] = None
+    group = True
+    weight: Optional[float] = None
     constraints: List[Constraint] = []
     implementations: Set[Type["TestOption"]] = set()
     bindings: Dict[str, BindInfo] = dict()
@@ -349,8 +346,8 @@ class TestOption(metaclass=TestOptionMeta):
             raise ValueError("TestOption group can have no weigth")
         if not group:
             cls.__z3var = z3.Bool(f"{cls.__name__}@{id(cls)}")
-        cls.weigth = weight
-        cls.__group = group
+        cls.weight = weight
+        cls.group = group
         for attrname, binding in cls.bindings.items():
             if binding.count_spec == CountSpec.EXACT_ONE:
                 cls.constraints.append(Implies(cls, ExactOne(binding.type)))
@@ -362,7 +359,7 @@ class TestOption(metaclass=TestOptionMeta):
             cls.__register_at_parent_classes()
 
     def __init__(self):
-        if self.__group:
+        if self.group:
             raise NotImplementedError(
                 "This is a TestOption group which must not be instantiated"
             )
@@ -371,7 +368,7 @@ class TestOption(metaclass=TestOptionMeta):
     def __register_at_parent_classes(cls):
         for basecls in cls.__mro__:
             if issubclass(basecls, TestOption) and basecls is not TestOption:
-                assert basecls is cls or basecls.__group, (
+                assert basecls is cls or basecls.group, (
                     f"Baseclass {basecls!r} of {cls!r} "
                     f"has to be marked as 'class ...(..., group=True):'"
                 )
@@ -409,30 +406,81 @@ class TestOption(metaclass=TestOptionMeta):
     T = TypeVar("T", bound="TestOption")
 
     @classmethod
+    def get_absolute_weights(
+        cls: Type[T], *constrs: Constraint, weight_func: Optional[WeightFunc] = None
+    ):
+        def collect_parent_child_relations(child: Type["TestOption"]):
+            parent = cast(Type["TestOption"], child.__base__)
+            if parent is TestOption:
+                root_list.add(child)
+            elif parent in children_map:
+                children_map[parent].add(child)
+            else:  # not yet visited => step up to parent
+                children_map[parent] = {child}
+                collect_parent_child_relations(parent)
+
+        def sum_abs_weights(parent: Type["TestOption"]):
+            weight = weight_func(parent)
+            if parent.group:
+                abs_weights[parent] = sum(
+                    sum_abs_weights(child) for child in children_map[parent]
+                )
+            else:
+                abs_weights[parent] = weight or 1
+            return weight if weight is not None else abs_weights[parent]
+
+        def scale_abs_weights(parent: Type["TestOption"], factor=1.0):
+            dest_parent_weight = weight_func(parent)
+            if dest_parent_weight is None or abs_weights[parent] == dest_parent_weight:
+                child_factor = factor  # no rescaling required
+            elif abs_weights[parent] == 0:
+                raise ValueError(
+                    f"{parent!r} enforces weigth {dest_parent_weight} "
+                    f"but has no children (or only children of weight 0)"
+                )
+            else:
+                child_factor = factor * dest_parent_weight / abs_weights[parent]
+            abs_weights[parent] *= child_factor
+            for child in children_map[parent]:
+                scale_abs_weights(child, child_factor)
+
+        if weight_func is None:
+            weight_func = lambda impl: impl.weight
+
+        available_testoptions = set(cls.iter_dependencies()).union(*constrs)
+        children_map: Dict[Type["TestOption"], Set[Type["TestOption"]]]
+        children_map = dict.fromkeys(available_testoptions, set())
+        root_list = set()
+        for to in available_testoptions:
+            collect_parent_child_relations(to)
+
+        abs_weights = {}
+        for root in root_list:
+            sum_abs_weights(root)
+            scale_abs_weights(root)
+        return abs_weights
+
+    @classmethod
     def generate_testsetup(
         cls: Type[T],
         *constrs: Constraint,
         weight_func: Optional[WeightFunc] = None,
     ) -> TestSetup[T]:
         def instanciate_matching_testoptions():
-            available_testoptions = set(cls.iter_dependencies())
             solver = z3.Optimize()
             solver.add(cls.__z3var)
             for constr in constrs:
                 solver.add(constr._to_z3_formula())
-                available_testoptions |= set(constr)
+            available_testoptions = set(cls.iter_dependencies()).union(*constrs)
             for to in available_testoptions:
                 for constr in to.constraints:
                     solver.add(constr._to_z3_formula())
-                weight = weight_func(to) if weight_func else to.weigth
-                if weight == WEIGHT_ENFORCE:
-                    solver.add(to._to_z3_formula())
-                elif weight == 0:
-                    solver.add(z3.Not(to.__z3var))
-                elif weight is not None:
-                    if weight < 0.000001:
+            abs_weights = cls.get_absolute_weights(*constrs, weight_func=weight_func)
+            for to, abs_weight in abs_weights.items():
+                if not to.group:
+                    if abs_weight < 0.000001:
                         raise ValueError("Weights < 0.000001 are not supported")
-                    solver.add_soft(to._to_z3_formula(), f"{weight:f}")
+                    solver.add_soft(to._to_z3_formula(), abs_weight)
             if solver.check() != z3.sat:
                 raise UnsolvableError("Cannot solve constraints")
             model = solver.model()
@@ -452,7 +500,7 @@ class TestOption(metaclass=TestOptionMeta):
                         impl = bound_testoptions.pop() if bound_testoptions else None
                         setattr(to, attrname, impl)
 
-        if cls.__group:
+        if cls.group:
             raise UnsolvableError("Cannot generate TestSetup from TestOption group")
         testoptions = instanciate_matching_testoptions()
         bind_instances(testoptions)
