@@ -141,16 +141,14 @@ class SetOperator(Constraint):
 class No(SetOperator):
     @functools.lru_cache
     def _to_z3_formula(self):
-        return z3.And(
-            *[z3.Not(impl._to_z3_formula()) for impl in self.op.implementations]
-        )
+        return z3.And(*[z3.Not(impl._to_z3_formula()) for impl in self])
 
 
 @dataclass(frozen=True)
 class Any(SetOperator):
     @functools.lru_cache
     def _to_z3_formula(self):
-        return z3.Or(*[impl._to_z3_formula() for impl in self.op.implementations])
+        return z3.Or(*[impl._to_z3_formula() for impl in self])
 
 
 @dataclass(frozen=True)
