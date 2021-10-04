@@ -35,7 +35,7 @@ from typing import List, Callable, cast
 
 
 @pytest.fixture
-def Base() -> Type["TestOption"]:
+def Base() -> Type[TestOption]:
     class Base(TestOption, group=True):
         pass
 
@@ -43,7 +43,7 @@ def Base() -> Type["TestOption"]:
 
 
 @pytest.fixture
-def Impl1(Base) -> Type["TestOption"]:
+def Impl1(Base) -> Type[TestOption]:
     class Impl1(Base):
         pass
 
@@ -51,7 +51,7 @@ def Impl1(Base) -> Type["TestOption"]:
 
 
 @pytest.fixture
-def Impl2(Base) -> Type["TestOption"]:
+def Impl2(Base) -> Type[TestOption]:
     class Impl2(Base):
         pass
 
@@ -59,7 +59,7 @@ def Impl2(Base) -> Type["TestOption"]:
 
 
 @pytest.fixture
-def Impl3(Base) -> Type["TestOption"]:
+def Impl3(Base) -> Type[TestOption]:
     class Impl3(Base):
         pass
 
@@ -72,6 +72,30 @@ def ImplRoot(Base):
         dep = bind_optional(Base)
 
     return ImplRoot
+
+
+@pytest.fixture
+def AltBase() -> Type[TestOption]:
+    class Base_2(TestOption, group=True):
+        pass
+
+    return Base_2
+
+
+@pytest.fixture
+def AltImpl1(AltBase) -> Type[TestOption]:
+    class AltImpl1(AltBase):
+        pass
+
+    return AltImpl1
+
+
+@pytest.fixture
+def AltImpl2(AltBase) -> Type[TestOption]:
+    class AltImpl2(AltBase):
+        pass
+
+    return AltImpl2
 
 
 def assert_constr(*constraints, expect=None):
@@ -247,21 +271,18 @@ class Test_TestOption:
 
         assert Base.registered_children == {Impl21, Impl22}
 
-    def test_create_onBindings_addsConstraints(self, Base):
-        class Base2(TestOption, group=True):
-            pass
-
-        class Base3(TestOption, group=True):
+    def test_create_onBindings_addsConstraints(self, Base, AltBase):
+        class Alt2Base(TestOption, group=True):
             pass
 
         class Impl(TestOption):
             dep = bind(Base)
-            opt_dep = bind_optional(Base2)
-            set_dep = bind_set(Base3)
+            opt_dep = bind_optional(AltBase)
+            set_dep = bind_set(Alt2Base)
 
         assert set(Impl.constraints) == {
             Implies(Impl, ExactOne(Base)),
-            Implies(Impl, No(Base2) | ExactOne(Base2)),
+            Implies(Impl, No(AltBase) | ExactOne(AltBase)),
         }
 
     def test_create_onWrongAttrType_raiseMeaningfulTypeError(self):
@@ -303,18 +324,14 @@ class Test_TestOption:
 
         assert set(Impl3.iter_dependencies()) == {Impl1, Impl2, Impl3}
 
-    def test_iterDependencies_onOptionalAndSetAttrs_ok(self, Base, Impl1):
-        class Base2(TestOption, group=True):
-            pass
-
-        class Impl2(Base2):
-            pass
-
-        class Impl3(TestOption):
+    def test_iterDependencies_onOptionalAndSetAttrs_ok(
+        self, Base, Impl1, AltBase, AltImpl1
+    ):
+        class RootImpl(TestOption):
             opt_dep = bind_optional(Base)
-            set_dep = bind_set(Base2)
+            set_dep = bind_set(AltBase)
 
-        assert set(Impl3.iter_dependencies()) == {Impl1, Impl2, Impl3}
+        assert set(RootImpl.iter_dependencies()) == {Impl1, AltImpl1, RootImpl}
 
     def test_iterDependencies_onReferredByConstraintsOnly_addedToList(self, Impl1):
         class Impl2(TestOption):
