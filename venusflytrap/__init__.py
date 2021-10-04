@@ -34,12 +34,9 @@ class Constraint:
 
 
 @dataclass(frozen=True)
-class And(Constraint):
+class BinaryBoolOperator(Constraint):
     op1: Constraint
     op2: Constraint
-
-    def _to_z3_formula(self):
-        return z3.And(self.op1._to_z3_formula(), self.op2._to_z3_formula())
 
     def __iter__(self):
         yield from self.op1
@@ -47,16 +44,9 @@ class And(Constraint):
 
 
 @dataclass(frozen=True)
-class And(Constraint):
-    op1: Constraint
-    op2: Constraint
-
+class And(BinaryBoolOperator):
     def _to_z3_formula(self):
         return z3.And(self.op1._to_z3_formula(), self.op2._to_z3_formula())
-
-    def __iter__(self):
-        yield from self.op1
-        yield from self.op2
 
 
 @dataclass(frozen=True)
@@ -71,55 +61,27 @@ class Not(Constraint):
 
 
 @dataclass(frozen=True)
-class Or(Constraint):
-    op1: Constraint
-    op2: Constraint
-
+class Or(BinaryBoolOperator):
     def _to_z3_formula(self):
         return z3.Or(self.op1._to_z3_formula(), self.op2._to_z3_formula())
 
-    def __iter__(self):
-        yield from self.op1
-        yield from self.op2
-
 
 @dataclass(frozen=True)
-class Xor(Constraint):
-    op1: Constraint
-    op2: Constraint
-
+class Xor(BinaryBoolOperator):
     def _to_z3_formula(self):
         return z3.Xor(self.op1._to_z3_formula(), self.op2._to_z3_formula())
 
-    def __iter__(self):
-        yield from self.op1
-        yield from self.op2
-
 
 @dataclass(frozen=True)
-class Implies(Constraint):
-    op1: Constraint
-    op2: Constraint
-
+class Implies(BinaryBoolOperator):
     def _to_z3_formula(self):
         return z3.Implies(self.op1._to_z3_formula(), self.op2._to_z3_formula())
 
-    def __iter__(self):
-        yield from self.op1
-        yield from self.op2
-
 
 @dataclass(frozen=True)
-class Equal(Constraint):
-    op1: Constraint
-    op2: Constraint
-
+class Equal(BinaryBoolOperator):
     def _to_z3_formula(self):
         return self.op1._to_z3_formula() == self.op2._to_z3_formula()
-
-    def __iter__(self):
-        yield from self.op1
-        yield from self.op2
 
 
 @dataclass(frozen=True)
