@@ -3,6 +3,7 @@ from unittest.mock import patch
 from venusflytrap import (
     TestOption,
     Constraint,
+    ConstraintSet,
     No,
     Any,
     All,
@@ -22,6 +23,8 @@ from venusflytrap import (
     handler,
     avail_impls,
     WeightFunc,
+    Mul,
+    Add,
 )
 import z3  # type: ignore
 from typing import List, Callable, cast
@@ -76,10 +79,10 @@ def ImplRoot(Base):
 
 @pytest.fixture
 def AltBase() -> Type[TestOption]:
-    class Base_2(TestOption, group=True):
+    class AltBase(TestOption, group=True):
         pass
 
-    return Base_2
+    return AltBase
 
 
 @pytest.fixture
@@ -156,32 +159,39 @@ class TestConstraint:
         assert_constr(Equal(Impl1, Impl2), Impl1, expect={Impl2: True})
         assert_constr_fail(Equal(Impl1, Impl2), ~Impl1, Impl2)
 
-    def test_iter_onTestOption_returnsSelf(self, Base, Impl1):
-        assert set(iter(Base)) == {Base}
-        assert set(iter(Impl1)) == {Impl1}
+    def test_iterDirectDependencies_onTestOption_returnsImpls(self, Base, Impl1, Impl2):
+        assert set(Base.iter_direct_dependencies()) == {Impl1, Impl2}
 
-    def test_iter_onLogicalOperators_returnsOperands(self, Impl1, Impl2):
-        assert set(iter(Impl1 & ~Impl2)) == {Impl1, Impl2}
-        assert set(iter(Implies(Impl1, Impl2))) == {Impl1, Impl2}
-        assert set(iter(Equal(Impl1, Impl2))) == {Impl1, Impl2}
+    def test_iterDirectDependencies_onLogicalOperators_returnsOperands(
+        self, Impl1, Impl2
+    ):
+        assert set((Impl1 & ~Impl2).iter_direct_dependencies()) == {Impl1, Impl2}
+        assert set(Implies(Impl1, Impl2).iter_direct_dependencies()) == {Impl1, Impl2}
+        assert set(Equal(Impl1, Impl2).iter_direct_dependencies()) == {Impl1, Impl2}
 
     @pytest.mark.parametrize("operator", SETOPS)
-    def test_iter_onSetOps_returnsAllImplementations(
+    def test_iterDirectDependencies_onSetOps_returnsAllImplementations(
         self, Base, Impl1, Impl2, operator
     ):
-        assert set(operator(Base)) == {Impl1, Impl2}
+        assert set(operator(Base).iter_direct_dependencies()) == {Impl1, Impl2}
 
     @pytest.mark.parametrize("operator", SETOPS)
-    def test_iter_onSetOpsWithExcludingFilter_returnsAllImplementationsExceptSpecifiedOnes(
+    def test_iterDirectDependencies_onSetOpsWithExcludingFilter_returnsAllImplementationsExceptSpecifiedOnes(
         self, Base, Impl1, Impl2, Impl3, operator
     ):
-        assert set(operator(Base, excluding={Impl2, Impl3})) == {Impl1}
+        assert set(
+            operator(Base, excluding={Impl2, Impl3}).iter_direct_dependencies()
+        ) == {Impl1}
 
     @pytest.mark.parametrize("operator", SETOPS)
-    def test_iter_onSetOpsWithWhereFilter_returnsAllImplementationsMatchingWhereFunc(
+    def test_iterDirectDependencies_onSetOpsWithWhereFilter_returnsAllImplementationsMatchingWhereFunc(
         self, Base, Impl1, Impl2, Impl3, operator
     ):
-        assert set(operator(Base, where=lambda i: i.__name__ >= "Impl2")) == {
+        assert set(
+            operator(
+                Base, where=lambda i: i.__name__ >= "Impl2"
+            ).iter_direct_dependencies()
+        ) == {
             Impl2,
             Impl3,
         }
@@ -713,3 +723,51 @@ class TestGenerateTestSetup:
             avail_impls(ts.root_inst)
         with pytest.raises(ValueError):
             avail_impls(ts.root_inst)
+
+
+class TestConstraintSet:
+    def test_repr_onMul(self, Impl1, Impl2):
+        assert repr(Mul(Impl1, Impl2)) == "<Impl1> * <Impl2>"
+
+    def test_repr_onAdd(self, Impl1, Impl2):
+        assert repr(Add(Impl1, Impl2)) == "<Impl1> + <Impl2>"
+
+    def test_mul_generatesMulObject(self, Impl1, Impl2):
+        mul_constr_set = Impl1 * Impl2
+        assert isinstance(mul_constr_set, Mul)
+
+    def test_add_generatesAddObject(self, Impl1, Impl2):
+        add_constr_set = Impl1 + Impl2
+        assert isinstance(add_constr_set, Add)
+
+    def test_repr_onMultipleAdd(self, Impl1, Impl2, Impl3):
+        assert repr(Impl1 + Impl2 + Impl3) == "<Impl1> + <Impl2> + <Impl3>"
+
+    def test_repr_onMultiplySum_insertsParantheses(self, Impl1, Impl2, Impl3):
+        assert repr((Impl1 + Impl2) * Impl3) == "(<Impl1> + <Impl2>) * <Impl3>"
+
+    def test_repr_onAddProduct_insertParantheses(self, Impl1, Impl2, Impl3):
+        assert repr((Impl1 * Impl2) + Impl3) == "(<Impl1> * <Impl2>) + <Impl3>"
+
+    def test_add_generatesCollection(self, Base, Impl1, Impl2):
+        class Impl21(TestOption):
+            pass
+
+        assert set(Base + Impl21) == {Impl1, Impl2, Impl21}
+
+    def test_mul_generatesCrossProduct(self, Base, Impl1, Impl2):
+        class Base2(TestOption, group=True):
+            pass
+
+        class Impl21(Base2):
+            pass
+
+        class Impl22(Base2):
+            pass
+
+        assert set(Base * Base2) == {
+            Impl1 & Impl21,
+            Impl1 & Impl22,
+            Impl2 & Impl21,
+            Impl2 & Impl22,
+        }

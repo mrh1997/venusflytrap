@@ -17,7 +17,7 @@ class Constraint:
     def _to_z3_formula(self):
         raise NotImplementedError("This is an abstract base class/group class")
 
-    def __iter__(self):
+    def iter_direct_dependencies(self) -> Iterator[Type["TestOption"]]:
         raise NotImplementedError("This is an abstract base class/group class")
 
     def __and__(self, other: "Constraint"):
@@ -38,9 +38,9 @@ class BinaryBoolOperator(Constraint):
     op1: Constraint
     op2: Constraint
 
-    def __iter__(self):
-        yield from self.op1
-        yield from self.op2
+    def iter_direct_dependencies(self):
+        yield from self.op1.iter_direct_dependencies()
+        yield from self.op2.iter_direct_dependencies()
 
 
 @dataclass(frozen=True)
@@ -56,8 +56,8 @@ class Not(Constraint):
     def _to_z3_formula(self):
         return z3.Not(self.op._to_z3_formula())
 
-    def __iter__(self):
-        yield from self.op
+    def iter_direct_dependencies(self):
+        yield from self.op.iter_direct_dependencies()
 
 
 @dataclass(frozen=True)
@@ -90,7 +90,7 @@ class SetOperator(Constraint):
     where: Optional[Callable[[Type["TestOption"]], bool]] = None
     excluding: Optional[Set[Type["TestOption"]]] = None
 
-    def __iter__(self):
+    def iter_direct_dependencies(self):
         impls = self.op.implementations
         if self.where:
             impls = {i for i in impls if self.where(i)}
@@ -103,21 +103,25 @@ class SetOperator(Constraint):
 class No(SetOperator):
     @functools.lru_cache
     def _to_z3_formula(self):
-        return z3.And(*[z3.Not(impl._to_z3_formula()) for impl in self])
+        return z3.And(
+            *[z3.Not(impl._to_z3_formula()) for impl in self.iter_direct_dependencies()]
+        )
 
 
 @dataclass(frozen=True)
 class Any(SetOperator):
     @functools.lru_cache
     def _to_z3_formula(self):
-        return z3.Or(*[impl._to_z3_formula() for impl in self])
+        return z3.Or(
+            *[impl._to_z3_formula() for impl in self.iter_direct_dependencies()]
+        )
 
 
 @dataclass(frozen=True)
 class All(SetOperator):
     @functools.lru_cache
     def _to_z3_formula(self):
-        return z3.And(*[c._to_z3_formula() for c in self])
+        return z3.And(*[c._to_z3_formula() for c in self.iter_direct_dependencies()])
 
 
 def _count_ones(z3_vars, start, end):
@@ -181,12 +185,51 @@ def link(constraint: Constraint, testoption: Optional[Type["TestOption"]] = None
         testoption.constraints.append(Equal(testoption, constraint))
 
 
-class TestOptionMeta(type, Constraint):
+class ConstraintSet:
+    def __mul__(self, other: "ConstraintSet") -> "ConstraintSet":
+        return Mul(self, other)
+
+    def __add__(self, other: "ConstraintSet") -> "ConstraintSet":
+        return Add(self, other)
+
+    def __iter__(self) -> Iterator[Constraint]:
+        raise NotImplementedError("This is an abstract base class/group class")
+
+
+@dataclass(frozen=True)
+class BinaryConstraintSet(ConstraintSet):
+    op1: ConstraintSet
+    op2: ConstraintSet
+
+    OP_STR = ""
+
     def __repr__(self):
-        return "<" + self.__name__ + ">"
+        op1_str = repr(self.op1)
+        if isinstance(self.op1, BinaryConstraintSet) and self.op1.OP_STR != self.OP_STR:
+            op1_str = f"({op1_str})"
+        op2_str = repr(self.op2)
+        if isinstance(self.op2, BinaryConstraintSet) and self.op2.OP_STR != self.OP_STR:
+            op2_str = f"({op2_str})"
+        return f"{op1_str} {self.OP_STR} {op2_str}"
+
+
+@dataclass(frozen=True, repr=False)
+class Mul(BinaryConstraintSet):
+    OP_STR = "*"
 
     def __iter__(self):
-        yield self
+        for op1_item in self.op1:
+            for op2_item in self.op2:
+                yield op1_item & op2_item
+
+
+@dataclass(frozen=True, repr=False)
+class Add(BinaryConstraintSet):
+    OP_STR = "+"
+
+    def __iter__(self):
+        yield from self.op1
+        yield from self.op2
 
 
 T = TypeVar("T", bound="TestOption")
@@ -218,7 +261,7 @@ def bind_set(type: Type[T]) -> Set[T]:
 
 def avail_impls(bound_attr: Union[T, Set[T], None]) -> Set[T]:
     """
-    Returns all available subclasses that are available for the passed
+    Returns all available that are available for the passed
     attribute.
 
     bound_attr has to be a class attribute that was setup via bind(),
@@ -272,6 +315,19 @@ class TestSetup(Generic[T]):
             if impl in self.testoptions:
                 self.testoptions[impl].teardown()
         return self.root_inst
+
+
+class TestOptionMeta(type, Constraint, ConstraintSet):
+    implementations: Set[Type["TestOption"]]
+
+    def __repr__(self):
+        return "<" + self.__name__ + ">"
+
+    def iter_direct_dependencies(self):
+        return iter(self.implementations)
+
+    def __iter__(self):
+        return self.iter_direct_dependencies()
 
 
 class TestOption(metaclass=TestOptionMeta):
@@ -358,7 +414,7 @@ class TestOption(metaclass=TestOptionMeta):
                 if binding.type not in collected_deps:
                     yield from binding.type.iter_dependencies(collected_deps)
             for constr in impl.constraints:
-                for constr_depcls in constr:
+                for constr_depcls in constr.iter_direct_dependencies():
                     if constr_depcls not in collected_deps:
                         yield from constr_depcls.iter_dependencies(collected_deps)
             yield impl
@@ -407,7 +463,9 @@ class TestOption(metaclass=TestOptionMeta):
         if weight_func is None:
             weight_func = lambda impl: impl.weight
 
-        available_testoptions = set(cls.iter_dependencies()).union(*constrs)
+        available_testoptions = set(cls.iter_dependencies()).union(
+            *[c.iter_direct_dependencies() for c in constrs]
+        )
         children_map: Dict[Type["TestOption"], Set[Type["TestOption"]]]
         children_map = dict.fromkeys(available_testoptions, set())
         root_list = set()
@@ -431,7 +489,9 @@ class TestOption(metaclass=TestOptionMeta):
             solver.add(cls.__z3var)
             for constr in constrs:
                 solver.add(constr._to_z3_formula())
-            available_testoptions = set(cls.iter_dependencies()).union(*constrs)
+            available_testoptions = set(cls.iter_dependencies()).union(
+                *[c.iter_direct_dependencies() for c in constrs]
+            )
             for to in available_testoptions:
                 for constr in to.constraints:
                     solver.add(constr._to_z3_formula())
